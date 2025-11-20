@@ -399,7 +399,7 @@ async def main():
     @dp.message(Command("start"))
     async def start_command(message: Message):
         asyncio.create_task(add_user(message.from_user.id))
-        await message.answer("👋 <b>Музыкальный бот</b>\nПиши название трека 👇",
+        await message.answer("👋 <b>Музыкальный бот</b>\nПиши название трека",
                              parse_mode="HTML")
 
     @dp.message(Command("send"))
@@ -565,11 +565,16 @@ async def main():
 
 if __name__ == "__main__":
     import sys
+    
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        
     try:
         import uvloop
         uvloop.install()
-    except:
+        print("✅ uvloop installed & running!")
+    except ImportError:
+        print("⚠️ uvloop not found, using default asyncio loop")
         pass
+
     asyncio.run(main())
