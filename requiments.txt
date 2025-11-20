@@ -1,0 +1,5 @@
+aiogram
+aiohttp
+aiosqlite
+ujson
+uvloop
