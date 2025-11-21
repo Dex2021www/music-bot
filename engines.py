@@ -104,7 +104,6 @@ class SoundCloudEngine:
                 if resp.status == 200: return (await resp.json(loads=ujson.loads)).get('url')
         except: return None
 
-# engines.py (В начале добавь импорт random)
 import random
 from config import PIPED_MIRRORS  # Импортируем список вместо одной ссылки
 
@@ -128,7 +127,7 @@ class YouTubeEngine:
                     if resp.status == 200:
                         return await resp.json(loads=ujson.loads)
                     # Если 429 (Too Many Requests) или 403 - пробуем следующее
-                    # print(f"⚠️ Mirror {base_url} failed: {resp.status}") 
+                    # print(f" Mirror {base_url} failed: {resp.status}") 
             except:
                 pass # Ошибка сети - пробуем следующее
         return None

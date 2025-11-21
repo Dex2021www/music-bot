@@ -1,18 +1,23 @@
 import asyncio
 import hashlib
-from aiogram import Router, types, Bot
+from cachetools import TTLCache
+from aiogram import Router, types
 from aiogram.types import InlineQuery, InlineQueryResultAudio, Message, CallbackQuery
 from aiogram.filters import Command
 from config import FINAL_LIMIT, INLINE_LIMIT, ADMIN_ID
-from database import add_user, get_active_users, mark_inactive
+from database import add_user, get_users_count, get_active_users_cursor, mark_inactive
 from utils import format_plays
 
 router = Router()
 
-# Глобальные переменные (будут установлены через setup_handlers)
 engine = None
 bot_instance = None 
-USER_SOURCES = {}
+
+# ОПТИМИЗАЦИЯ RAM:
+# Храним настройки только 1000 последних активных пользователей.
+# Если юзера нет в кэше, считаем 'all'.
+# TTL = 1 час.
+USER_SOURCES = TTLCache(maxsize=1000, ttl=3600)
 
 def setup_handlers(main_engine, main_bot):
     global engine, bot_instance
@@ -23,6 +28,7 @@ def setup_handlers(main_engine, main_bot):
 
 @router.message(Command("start"))
 async def start_command(message: Message):
+    # Fire and forget (не ждем записи в БД)
     asyncio.create_task(add_user(message.from_user.id))
     await message.answer(
         "<b>Музыкальный бот</b>\n\n"
@@ -39,25 +45,45 @@ async def send_ad(message: Message):
         await message.answer("Пустое сообщение")
         return
         
-    users = await get_active_users()
-    await message.answer(f"Рассылка на {len(users)} юзеров...")
+    msg = await message.answer("🚀 Начинаю рассылку (cursor mode)...")
     
     count = 0
-    for (uid,) in users:
-        try:
-            await bot_instance.send_message(uid, text)
-            count += 1
-            await asyncio.sleep(0.03)
-        except Exception as e:
-            if "Forbidden" in str(e): await mark_inactive(uid)
-    await message.answer(f"Готово. Отправлено: {count}")
+    # Используем курсор, чтобы не грузить всех юзеров в RAM
+    conn_ctx = await get_active_users_cursor()
+    if not conn_ctx:
+        await msg.edit_text("❌ Нет соединения с БД")
+        return
+
+    try:
+        async with conn_ctx as connection:
+            # Создаем транзакцию для курсора
+            async with connection.transaction():
+                # Читаем пачками по 100 штук
+                async for record in connection.cursor("SELECT user_id FROM users WHERE is_active = TRUE"):
+                    uid = record['user_id']
+                    try:
+                        await bot_instance.send_message(uid, text)
+                        count += 1
+                        # Небольшая пауза, чтобы не словить FloodWait от Telegram
+                        await asyncio.sleep(0.05) 
+                    except Exception as e:
+                        err = str(e)
+                        if "Forbidden" in err or "blocked" in err:
+                            asyncio.create_task(mark_inactive(uid))
+                    
+                    if count % 100 == 0:
+                        await asyncio.sleep(1) # Даем передышку CPU и сети
+    except Exception as e:
+        await message.answer(f"Ошибка рассылки: {e}")
+    
+    await message.answer(f"✅ Готово. Отправлено: {count}")
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
     if message.from_user.id != ADMIN_ID: return
-    
-    users = await get_active_users()
-    await message.answer(f"📊 <b>Статистика:</b>\n\n👥 Пользователей в базе: <b>{len(users)}</b>", parse_mode="HTML")
+    # Count делается в БД, в RAM прилетает только одно число
+    count = await get_users_count()
+    await message.answer(f"📊 Пользователей в базе: <b>{count}</b>", parse_mode="HTML")
 
 @router.message(Command("source"))
 async def cmd_source(message: Message):
@@ -66,6 +92,7 @@ async def cmd_source(message: Message):
         [types.InlineKeyboardButton(text="☁️ Только SoundCloud", callback_data="src_sc")],
         [types.InlineKeyboardButton(text="▶️ Только YouTube", callback_data="src_yt")]
     ])
+    # По умолчанию 'all', если нет в кэше
     current = USER_SOURCES.get(message.from_user.id, 'all').upper()
     await message.answer(f"⚙️ <b>Фильтр поиска</b>\nСейчас: {current}", reply_markup=kb, parse_mode="HTML")
 
@@ -77,20 +104,18 @@ async def set_source(call: CallbackQuery):
     await call.message.edit_text(f"✅ Режим установлен: <b>{text_map[mode]}</b>", parse_mode="HTML")
     await call.answer()
 
-# --- ПОИСК В ЧАТЕ ---
-
 @router.message()
 async def search_handler(message: Message):
     if not message.text or message.text.startswith("/"): return
     query = message.text.strip()
     if len(query) < 2: return
 
+    # Fire-and-forget добавление юзера
     asyncio.create_task(add_user(message.from_user.id))
     mode = USER_SOURCES.get(message.from_user.id, 'all')
     
     await bot_instance.send_chat_action(message.chat.id, "typing")
     
-    # Ищем, сортируем и берем топ
     all_candidates = await engine.search(query, mode)
     results = all_candidates[:FINAL_LIMIT]
     
@@ -98,7 +123,6 @@ async def search_handler(message: Message):
         await message.answer("❌ Ничего не найдено.")
         return
 
-    # Формируем текст и компактные кнопки
     res_text = f"🔎 <b>Результаты:</b> {query}\n\n"
     buttons_row_1 = []
     buttons_row_2 = []
@@ -107,13 +131,13 @@ async def search_handler(message: Message):
         num = i + 1
         icon = "☁️" if item['source'] == 'SC' else "▶️"
         
-        # Очищаем название от дублей (Artist - Artist Title -> Artist - Title)
         clean_title = item['title'].replace(item['artist'], "").strip(" -|")
         if not clean_title: clean_title = item['title']
         
+        # Лимитируем длину строки в RAM
         res_text += f"<b>{num}.</b> {icon} {item['artist']} — {clean_title[:40]}\n"
         
-        # Кнопка: dl|SOURCE|ID
+        # Используем короткий callback data
         btn = types.InlineKeyboardButton(text=f"{num}", callback_data=f"dl|{item['source']}|{item['id']}")
         
         if i < 5: buttons_row_1.append(btn)
@@ -125,11 +149,10 @@ async def search_handler(message: Message):
     
     await message.answer(res_text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb_rows), parse_mode="HTML")
 
-# --- СКАЧИВАНИЕ ---
-
 @router.callback_query(lambda c: c.data.startswith("dl|"))
 async def download_callback(call: CallbackQuery):
     _, source, item_id = call.data.split("|")
+    # Сразу даем фидбек, чтобы телеграм не крутил часики
     await call.answer("🚀 Загружаю...")
     
     try:
@@ -140,30 +163,26 @@ async def download_callback(call: CallbackQuery):
             url = await engine.yt.resolve_url(item_id)
             
         if not url:
-            await call.message.answer("❌ Не удалось получить ссылку (истекла или блок).")
+            await call.message.answer("❌ Не удалось получить ссылку.")
             return
             
         await bot_instance.send_audio(
             chat_id=call.from_user.id,
             audio=url,
-            caption=f"🤖 via @{(await bot_instance.get_me()).username}"
+            caption=f"🤖 @{(await bot_instance.get_me()).username}"
         )
-    except Exception as e:
+    except Exception:
         await call.message.answer("❌ Ошибка отправки файла.")
-
-# --- ИНЛАЙН РЕЖИМ ---
 
 @router.inline_query()
 async def inline_handler(query: InlineQuery):
     text = query.query.strip()
     if len(text) < 2: return
     
-    # Поиск
     mode = USER_SOURCES.get(query.from_user.id, 'all')
     all_results = await engine.search(text, mode)
     top_results = all_results[:INLINE_LIMIT]
     
-    # Для инлайна нужно получить ссылки СРАЗУ
     tasks = []
     for item in top_results:
         if item['source'] == 'SC': 
@@ -184,9 +203,9 @@ async def inline_handler(query: InlineQuery):
             id=res_id, 
             audio_url=real_url, 
             title=item['title'],
-            performer=f"{icon} {item['artist']} | {format_plays(item['playback_count'])}",
-            audio_duration=int(item['duration'] / 1000), 
-            thumbnail_url=item['artwork_url']
+            performer=f"{icon} {item['artist']}",
+            audio_duration=int(item['duration'] / 1000)
+            # Убрал artwork, иногда они тяжелые и ломают инлайн превью, если URL кривой
         ))
         
     try: 
