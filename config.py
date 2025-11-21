@@ -13,7 +13,7 @@ FALLBACK_CLIENT_ID = os.getenv("FALLBACK_CLIENT_ID", "LMlJPYvzQSVyjYv7faMQl9W7Oj
 # ================= API URLS =================
 # Зеркало Piped для YouTube.
 # Если перестанет искать, меняй на "https://pipedapi.kavin.rocks" или "https://pipedapi.drgns.space"
-PIPED_API_URL = "https://api.piped.bot"
+PIPED_API_URL = "https://api.piped.private.coffee"
 
 # ================= LIMITS & PERFORMANCE =================
 # Максимум одновременных тяжелых запросов (чтобы не превысить 512 МБ RAM)
