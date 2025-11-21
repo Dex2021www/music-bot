@@ -24,7 +24,7 @@ FALLBACK_CLIENT_ID = os.getenv("FALLBACK_CLIENT_ID",
 
 PIPED_API_URL = "https://api.piped.private.coffee"
 
-# Лимиты
+# Лимитыыыыыы
 MAX_CONCURRENT_REQ = 6
 SEARCH_CANDIDATES_SC = 60
 SEARCH_CANDIDATES_YT = 40
@@ -66,7 +66,7 @@ async def start_web_server():
     print("Web server started")
 
 
-# DATABASE
+# DATABASEввв
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
