@@ -3,17 +3,16 @@ import aiohttp
 import ujson
 import logging
 import gc
-import hashlib
 from config import (
     MAX_CONCURRENT_REQ, SEARCH_CANDIDATES_SC, SEARCH_CANDIDATES_YT,
-    PIPED_API_URL, FALLBACK_CLIENT_ID, BAD_CHARS_RE, FINAL_LIMIT
+    PIPED_API_URL, FALLBACK_CLIENT_ID, BAD_CHARS_RE
 )
-from utils import calculate_score, format_plays
+# ВОТ ТУТ БЫЛА ОШИБКА, ДОБАВИЛИ get_translit_variants
+from utils import calculate_score, format_plays, get_translit_variants
 
 logger = logging.getLogger(__name__)
 
 class KeyManager:
-    """Автоматически ищет рабочий Client ID для SoundCloud"""
     def __init__(self, session):
         self.session = session
         self.client_id = FALLBACK_CLIENT_ID
@@ -24,13 +23,10 @@ class KeyManager:
             async with self.session.get("https://soundcloud.com/discover", timeout=3) as resp:
                 if resp.status != 200: return
                 text = await resp.text()
-            # Ищем ссылки на JS файлы, где спрятан ключ
             import re
             js_urls = re.findall(r'src="(https://[^"]+/assets/[^"]+\.js)"', text)
             del text
             if not js_urls: return
-            
-            # Проверяем последние 2 скрипта (там обычно ключи)
             for url in js_urls[-2:]:
                 async with self.session.get(url, timeout=3) as js_resp:
                     if js_resp.status != 200: continue
@@ -74,7 +70,6 @@ class SoundCloudEngine:
                         title = item.get('title', '')
                         if not title or len(title) > 150 or BAD_CHARS_RE.search(title): continue
                         
-                        # Ищем прогрессивный поток
                         prog_url = next((t['url'] for t in item.get('media', {}).get('transcodings', []) 
                                        if t['format']['protocol'] == 'progressive'), None)
                         if not prog_url: continue
@@ -94,21 +89,15 @@ class SoundCloudEngine:
             except: return []
 
     async def resolve_url_by_id(self, track_id):
-        """Восстанавливает ссылку на скачивание по ID трека"""
         client_id = self.key_manager.get_id()
         try:
-            # 1. Получаем метаданные трека
             info_url = f"https://api-v2.soundcloud.com/tracks/{track_id}"
             async with self.session.get(info_url, params={"client_id": client_id}, timeout=3) as resp:
                 if resp.status != 200: return None
                 data = await resp.json(loads=ujson.loads)
-                
-                # 2. Ищем ссылку-шаблон
                 prog_url = next((t['url'] for t in data.get('media', {}).get('transcodings', []) 
                                if t['format']['protocol'] == 'progressive'), None)
                 if not prog_url: return None
-                
-                # 3. Получаем финальный mp3/m4a URL
                 return await self.resolve_url(prog_url)
         except: return None
 
@@ -127,7 +116,6 @@ class YouTubeEngine:
 
     async def search_raw(self, query: str):
         search_url = f"{PIPED_API_URL}/search"
-        # filter="all" чтобы находить и клипы, и аудио
         params = {"q": query, "filter": "all"}
         
         async with self.sem:
@@ -141,7 +129,6 @@ class YouTubeEngine:
                     candidates = []
                     for item in items[:SEARCH_CANDIDATES_YT]:
                         try:
-                            # Обработка разных типов ссылок (видео, шортс)
                             url_part = item.get('url', '')
                             if "/watch?v=" in url_part: 
                                 vid_id = url_part.split("v=")[-1].split("&")[0]
@@ -170,10 +157,8 @@ class YouTubeEngine:
                 if resp.status != 200: return None
                 data = await resp.json(loads=ujson.loads)
                 streams = data.get('audioStreams', [])
-                # Пытаемся найти M4A, если нет - берем первый попавшийся
                 best = next((s for s in streams if s.get('format') == 'M4A'), None)
                 if not best and streams: best = streams[0]
-                
                 return best['url'] if best else None
         except: return None
 
@@ -183,11 +168,9 @@ class MultiEngine:
         self.yt = YouTubeEngine(session)
 
     async def search(self, query: str, source_mode='all'):
-        # 1. Генерируем варианты запроса (Оригинал + Транслит)
-        # "кадиллак" -> ["кадиллак", "kadillak"]
+        # 1. Генерируем варианты (Оригинал + Транслит)
         search_queries = get_translit_variants(query)
         
-        # 2. Создаем задачи для поиска
         tasks = []
         for q in search_queries:
             if source_mode in ['all', 'sc']:
@@ -197,17 +180,13 @@ class MultiEngine:
         
         if not tasks: return []
         
-        # 3. Ждем все результаты
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # 4. Собираем всё в одну кучу и убираем дубликаты
         seen_ids = set()
         candidates = []
-        
         for res in raw_results:
             if isinstance(res, list):
                 for track in res:
-                    # Уникальный ключ: Источник + ID
                     uid = f"{track['source']}_{track['id']}"
                     if uid not in seen_ids:
                         seen_ids.add(uid)
@@ -215,10 +194,11 @@ class MultiEngine:
         
         if not candidates: return []
 
-        # 5. Сортировка (передаем ОРИГИНАЛЬНЫЙ запрос юзера)
-        # Функция calculate_score сама внутри проверит транслит
+        # Сортируем по ОРИГИНАЛЬНОМУ запросу
+        q_lower = query.lower().strip()
+        # Функция calculate_score сама внутри разберется с транслитом
         for c in candidates: 
-            c['score'] = calculate_score(c, query)
+            c['score'] = calculate_score(c, query) # Передаем query, не q_lower
         
         candidates.sort(key=lambda x: x['score'], reverse=True)
         gc.collect()
