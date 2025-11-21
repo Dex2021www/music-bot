@@ -7,13 +7,8 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 FALLBACK_CLIENT_ID = os.getenv("FALLBACK_CLIENT_ID", "LMlJPYvzQSVyjYv7faMQl9W7OjTBCaq4")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# ================= API =================
-# config.py
-
-# ... (Остальной код без изменений)
-
 # ================= API URLS =================
-# Список зеркал. Бот будет перебирать их, если одно упадет.
+# Список зеркал. Бот будет перебирать их, если одно упадет
 PIPED_MIRRORS = [
     "https://api.piped.private.coffee",  # Быстрое
     "https://api.piped.bot",             # Основное
@@ -21,8 +16,6 @@ PIPED_MIRRORS = [
     "https://pipedapi.drgns.space",      # Запасное
     "https://pipedapi.system41.com"      # Запасное
 ]
-
-# ... (Лимиты и списки слов оставляем как были)
 
 # ================= LIMITS =================
 MAX_CONCURRENT_REQ = 6
@@ -35,7 +28,7 @@ DB_NAME = "users.db"
 
 # ================= REGEX (РЕГУЛЯРКИ) =================
 
-# 1. Фильтр иероглифов (Для engines.py) - ВОТ ЕГО НЕ ХВАТАЛО
+# 1. Фильтр иероглифов (Для engines.py)
 BAD_CHARS_RE = re.compile(r'[\u0590-\u05ff\u0600-\u06ff\u0750-\u077f\u0900-\u097f\u0e00-\u0e7f\u4e00-\u9fff\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af\u1ea0-\u1eff]')
 
 # 2. Очистка скобок (Для utils.py)

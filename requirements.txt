@@ -4,3 +4,4 @@ asyncpg
 ujson
 uvloop
 transliterate
+asyncpg

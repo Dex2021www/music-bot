@@ -108,8 +108,6 @@ class SoundCloudEngine:
 import random
 from config import PIPED_MIRRORS  # Импортируем список вместо одной ссылки
 
-# ... (SoundCloudEngine оставляем без изменений) ...
-
 class YouTubeEngine:
     __slots__ = ('session', 'sem')
     def __init__(self, session):
@@ -118,7 +116,7 @@ class YouTubeEngine:
 
     async def _request(self, endpoint, params=None):
         """Умная функция запроса с перебором зеркал"""
-        # Перемешиваем зеркала, чтобы не долбить одно и то же (Load Balancing)
+        # Перемешиваем зеркала, чтобы не долбить одно и то же
         mirrors = PIPED_MIRRORS.copy()
         random.shuffle(mirrors)
 
