@@ -66,7 +66,7 @@ async def start_web_server():
     print("Web server started")
 
 
-# DATABASEввв
+# DATABASE
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
