@@ -1,45 +1,52 @@
 import os
 import re
 
-# --- TOKENS ---
+# ================= TOKENS =================
 TG_TOKEN = os.getenv("TG_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 FALLBACK_CLIENT_ID = os.getenv("FALLBACK_CLIENT_ID", "LMlJPYvzQSVyjYv7faMQl9W7OjTBCaq4")
 
-# --- API ---
+# ================= API =================
 PIPED_API_URL = "https://api.piped.private.coffee"
 
-# --- LIMITS ---
+# ================= LIMITS =================
 MAX_CONCURRENT_REQ = 6
-SEARCH_CANDIDATES_SC = 60  # Берем много
-SEARCH_CANDIDATES_YT = 40  # Чтобы было из чего выбирать
+SEARCH_CANDIDATES_SC = 60
+SEARCH_CANDIDATES_YT = 40
 FINAL_LIMIT = 10
 INLINE_LIMIT = 10
 CACHE_TTL = 600
 DB_NAME = "users.db"
 
-# --- CLEANING REGEX ---
-# Удаляем всё, что в скобках [], () если там служебная инфа
+# ================= REGEX (РЕГУЛЯРКИ) =================
+
+# 1. Фильтр иероглифов (Для engines.py) - ВОТ ЕГО НЕ ХВАТАЛО
+BAD_CHARS_RE = re.compile(r'[\u0590-\u05ff\u0600-\u06ff\u0750-\u077f\u0900-\u097f\u0e00-\u0e7f\u4e00-\u9fff\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af\u1ea0-\u1eff]')
+
+# 2. Очистка скобок (Для utils.py)
 BRACKETS_RE = re.compile(r'\s*[\(\[].*?[\)\]]') 
-# Оставляем только буквы и цифры для сравнения
+
+# 3. Только буквы и цифры (Для utils.py)
 ALPHANUM_RE = re.compile(r'\W+') 
 
-# --- BLACKLIST (Если это есть в названии - сразу бан) ---
-# Это убирает реакции, обзоры, уроки, караоке (если юзер сам не попросил)
+# ================= LISTS (СПИСКИ СЛОВ) =================
+
+# БАН-ЛИСТ: Если это есть в названии, трек скрывается
 BANNED_WORDS = {
     'reaction', 'review', 'tutorial', 'lesson', 'урок', 'разбор', 
     'cover by', 'кавер', 'parody', 'пародия', 'реакция', 'instrumental', 
     'karaoke', 'караоке', 'minus', 'минус', 'speed up', 'slowed', 'reverb'
 }
 
-# --- NOISE (Это мы вырезаем перед сравнением) ---
+# ШУМ: Эти слова вырезаются перед сравнением
 NOISE_WORDS = {
     'official video', 'official audio', 'lyrics', 'video', 'audio', 
     'hq', 'hd', '4k', 'music', 'mv', 'clip', 'клип', 'премьера', 
-    'premiere', 'single', 'album', 'full'
+    'premiere', 'single', 'album', 'full', 'live performance', 'live'
 }
 
-# --- STOP WORDS (Чистим запрос юзера) ---
+# СТОП-СЛОВА: Удаляются из запроса пользователя
 SEARCH_STOP_WORDS = {
-    'скачать', 'download', 'mp3', 'listen', 'слушать', 'free', 'track', 'песня'
+    'скачать', 'download', 'mp3', 'music', 'музыка', 'песня', 'song', 
+    'track', 'трек', 'слушать', 'listen', 'free', 'бесплатно', 'audio', 'аудио'
 }
