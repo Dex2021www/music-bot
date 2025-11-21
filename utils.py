@@ -1,55 +1,96 @@
-import os
-import re
+import math
+from config import BANNED_WORDS, SEARCH_STOP_WORDS
 
-# ================= TOKENS =================
-TG_TOKEN = os.getenv("TG_TOKEN", "")
-# Используем set для мгновенной проверки ID (O(1) скорость)
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-FALLBACK_CLIENT_ID = os.getenv("FALLBACK_CLIENT_ID", "LMlJPYvzQSVyjYv7faMQl9W7OjTBCaq4")
-DATABASE_URL = os.getenv("DATABASE_URL")
+def format_plays(count):
+    """Красивое число (1.5M, 300K)"""
+    if not count: return ""
+    if count >= 1_000_000: return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000: return f"{count / 1_000:.0f}K"
+    return f"{count}"
 
-# ================= API URLS =================
-PIPED_MIRRORS = [
-    "https://api.piped.private.coffee",
-    "https://pipedapi.kavin.rocks",
-    "https://pipedapi.drgns.space",
-    "https://pipedapi.system41.com",
-    "https://api.piped.bot"
-]
+def clean_query(text):
+    """Удаляет мусор типа 'скачать', 'mp3' из запроса"""
+    text = text.lower()
+    words = text.split()
+    # Оставляем только слова, которых НЕТ в стоп-листе
+    clean_words = [w for w in words if w not in SEARCH_STOP_WORDS]
+    
+    # Если после чистки ничего не осталось (юзер написал просто "скачать"), возвращаем оригинал
+    if not clean_words: return text
+    return " ".join(clean_words)
 
-# ================= LIMITS =================
-MAX_CONCURRENT_REQ = 10  # Увеличил для aiohttp
-SEARCH_CANDIDATES_SC = 50
-SEARCH_CANDIDATES_YT = 30
-FINAL_LIMIT = 10
-INLINE_LIMIT = 10
-CACHE_TTL = 600
+def calculate_score(item, query_raw):
+    """
+    LEGACY V3 LOGIC:
+    1. Точное совпадение слов = Огромный бонус.
+    2. Популярность = Огромный бонус.
+    3. Никаких скрытых фильтров.
+    """
+    score = 0
+    
+    # Подготовка данных
+    query_clean = clean_query(query_raw)
+    query_words = set(query_clean.split())
+    
+    # Полный текст трека (Название + Артист)
+    title_lower = item['title'].lower()
+    artist_lower = item['artist'].lower()
+    full_text = f"{artist_lower} {title_lower}"
+    
+    # Разбиваем трек на слова (убираем запятые и скобки для простоты)
+    import re
+    # Оставляем только буквы и цифры для разбиения на слова
+    item_words = set(re.findall(r'\w+', full_text))
 
-# ================= REGEX =================
-BAD_CHARS_RE = re.compile(r'[\u0590-\u05ff\u0600-\u06ff\u0750-\u077f\u0900-\u097f\u0e00-\u0e7f\u4e00-\u9fff\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af\u1ea0-\u1eff]')
-BRACKETS_RE = re.compile(r'\s*[\(\[].*?[\)\]]') 
-ALPHANUM_RE = re.compile(r'\W+') 
+    # --- 1. СОВПАДЕНИЕ СЛОВ (WORD COVERAGE) ---
+    # Это самое важное. Если я ищу "Faceless Ask Eternity", я хочу трек, где есть эти 3 слова.
+    
+    if not query_words:
+        return 0
 
-# ================= LISTS =================
-# БАН-ЛИСТ
-BANNED_WORDS = {
-    'reaction', 'review', 'tutorial', 'lesson', 'урок', 'разбор', 
-    'cover by', 'кавер', 'parody', 'пародия', 'реакция', 'instrumental', 
-    'karaoke', 'караоке', 'minus', 'минус', 'speed up', 'slowed', 'reverb'
-}
+    common_words = query_words.intersection(item_words)
+    coverage = len(common_words) / len(query_words)
 
-# Алиас для utils.py (исправление ошибки)
-TRASH_WORDS = BANNED_WORDS 
+    if coverage == 1.0:      
+        score += 300  # КОРОЛЕВСКИЙ БОНУС (Все слова найдены)
+    elif coverage >= 0.66:   
+        score += 100  # Найдено 2 из 3 слов
+    elif coverage > 0:
+        score += 50   # Найдено хоть что-то
+    else:
+        return -100   # Вообще нет совпадений слов -> в конец списка
 
-# ШУМ
-NOISE_WORDS = {
-    'official video', 'official audio', 'lyrics', 'video', 'audio', 
-    'hq', 'hd', '4k', 'music', 'mv', 'clip', 'клип', 'премьера', 
-    'premiere', 'single', 'album', 'full', 'live performance', 'live'
-}
+    # --- 2. ТОЧНАЯ ФРАЗА ---
+    # Бонус, если слова идут именно в том порядке, как в запросе
+    if query_clean in full_text:
+        score += 100
 
-# СТОП-СЛОВА
-SEARCH_STOP_WORDS = {
-    'скачать', 'download', 'mp3', 'music', 'музыка', 'песня', 'song', 
-    'track', 'трек', 'слушать', 'listen', 'free', 'бесплатно', 'audio', 'аудио'
-}
+    # --- 3. ПОПУЛЯРНОСТЬ (HEAVY WEIGHT) ---
+    # Чтобы Моргенштерн (100М) побеждал каверы (1К), даже если слова совпали у обоих.
+    plays = item.get('playback_count', 0) or 0
+    if plays > 0:
+        try:
+            # Log10(100M) = 8.   8 * 20 = 160 очков.
+            # Log10(1000) = 3.   3 * 20 = 60 очков.
+            # Разница в 100 очков. Это мощно, но не перебьет "Полное совпадение слов" (300 очков).
+            score += math.log10(plays) * 20
+        except: pass
+
+    # --- 4. БОНУС ЗА SC ---
+    if item.get('source') == 'SC':
+        score += 20
+
+    # --- 5. ШТРАФЫ ---
+    dur = item.get('duration', 0) / 1000
+    if dur < 40: score -= 50    # Рингтоны
+    elif dur > 900: score -= 30 # Сеты
+
+    # Штраф за ремиксы/каверы, ТОЛЬКО если юзер сам не написал "remix"
+    is_clean_search = not any(w in query_clean for w in BANNED_WORDS)
+    
+    if is_clean_search:
+        for bad in BANNED_WORDS:
+            if bad in title_lower:
+                score -= 50 # Сильный штраф за мусор
+
+    return score
