@@ -24,7 +24,7 @@ FALLBACK_CLIENT_ID = os.getenv("FALLBACK_CLIENT_ID",
 
 PIPED_API_URL = "https://api.piped.private.coffee"
 
-# Лимитыыыыыы
+# Лимиты
 MAX_CONCURRENT_REQ = 6
 SEARCH_CANDIDATES_SC = 60
 SEARCH_CANDIDATES_YT = 40
