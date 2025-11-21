@@ -25,9 +25,9 @@ def setup_handlers(main_engine, main_bot):
 async def start_command(message: Message):
     asyncio.create_task(add_user(message.from_user.id))
     await message.answer(
-        "👋 <b>Музыкальный бот</b>\n\n"
-        "🔎 Просто напиши название песни в чат.\n"
-        "⚙️ Выбрать источники: /source",
+        "<b>Музыкальный бот</b>\n\n"
+        "Просто напиши название песни в чат.\n"
+        "Выбрать источники: /source",
         parse_mode="HTML"
     )
 
@@ -55,7 +55,7 @@ async def send_ad(message: Message):
 @router.message(Command("source"))
 async def cmd_source(message: Message):
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="🌍 Все источники", callback_data="src_all")],
+        [types.InlineKeyboardButton(text="Все источники", callback_data="src_all")],
         [types.InlineKeyboardButton(text="☁️ Только SoundCloud", callback_data="src_sc")],
         [types.InlineKeyboardButton(text="▶️ Только YouTube", callback_data="src_yt")]
     ])
@@ -66,7 +66,7 @@ async def cmd_source(message: Message):
 async def set_source(call: CallbackQuery):
     mode = call.data.split("_")[1]
     USER_SOURCES[call.from_user.id] = mode
-    text_map = {'all': "🌍 ВЕЗДЕ", 'sc': "☁️ SOUNDCLOUD", 'yt': "▶️ YOUTUBE"}
+    text_map = {'all': "ВЕЗДЕ", 'sc': "☁️ SOUNDCLOUD", 'yt': "▶️ YOUTUBE"}
     await call.message.edit_text(f"✅ Режим установлен: <b>{text_map[mode]}</b>", parse_mode="HTML")
     await call.answer()
 

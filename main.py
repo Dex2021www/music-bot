@@ -50,7 +50,7 @@ async def main():
 
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-        print("🚀 Bot Started (Modular Version)")
+        print("🚀 Bot Started")
         await dp.start_polling(bot)
     finally:
         await session.close()
