@@ -5,7 +5,7 @@ import logging
 import gc
 from config import (
     MAX_CONCURRENT_REQ, SEARCH_CANDIDATES_SC, SEARCH_CANDIDATES_YT,
-    PIPED_API_URL, FALLBACK_CLIENT_ID, BAD_CHARS_RE
+    PIPED_MIRRORS, FALLBACK_CLIENT_ID, BAD_CHARS_RE
 )
 from utils import calculate_score, format_plays
 
