@@ -7,8 +7,7 @@ from config import (
     MAX_CONCURRENT_REQ, SEARCH_CANDIDATES_SC, SEARCH_CANDIDATES_YT,
     PIPED_API_URL, FALLBACK_CLIENT_ID, BAD_CHARS_RE
 )
-# ВОТ ТУТ БЫЛА ОШИБКА, ДОБАВИЛИ get_translit_variants
-from utils import calculate_score, format_plays, get_translit_variants
+from utils import calculate_score, format_plays
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +29,9 @@ class KeyManager:
             for url in js_urls[-2:]:
                 async with self.session.get(url, timeout=3) as js_resp:
                     if js_resp.status != 200: continue
-                    js_text = await js_resp.text()
-                    match = re.search(r'client_id:"([a-zA-Z0-9]{32})"', js_text)
-                    del js_text
+                    match = re.search(r'client_id:"([a-zA-Z0-9]{32})"', await js_resp.text())
                     if match:
                         self.client_id = match.group(1)
-                        print(f"✅ Key updated: {self.client_id}")
                         return
         except: pass
     
@@ -50,16 +46,16 @@ class SoundCloudEngine:
 
     async def search_raw(self, query: str):
         client_id = self.key_manager.get_id()
+        # Ищем много, фильтруем жестко в utils
         params = {"q": query, "client_id": client_id, "limit": SEARCH_CANDIDATES_SC, "app_version": "1699953100"}
         
         async with self.sem:
             try:
-                async with self.session.get("https://api-v2.soundcloud.com/search/tracks", params=params, timeout=2.5) as resp:
+                async with self.session.get("https://api-v2.soundcloud.com/search/tracks", params=params, timeout=3) as resp:
                     if resp.status == 401:
                         asyncio.create_task(self.key_manager.fetch_new_key())
                         return []
                     if resp.status != 200: return []
-                    
                     data = await resp.json(loads=ujson.loads)
                     raw = data.get('collection', [])
                     del data
@@ -68,7 +64,8 @@ class SoundCloudEngine:
                     for item in raw:
                         if not item.get('streamable'): continue
                         title = item.get('title', '')
-                        if not title or len(title) > 150 or BAD_CHARS_RE.search(title): continue
+                        # Жесткий фильтр иероглифов
+                        if len(title) > 150 or BAD_CHARS_RE.search(title): continue
                         
                         prog_url = next((t['url'] for t in item.get('media', {}).get('transcodings', []) 
                                        if t['format']['protocol'] == 'progressive'), None)
@@ -103,9 +100,8 @@ class SoundCloudEngine:
 
     async def resolve_url(self, url: str):
         try:
-            async with self.session.get(url, params={"client_id": self.key_manager.get_id()}, timeout=2) as resp:
-                if resp.status == 200:
-                    return (await resp.json(loads=ujson.loads)).get('url')
+            async with self.session.get(url, params={"client_id": self.key_manager.get_id()}, timeout=3) as resp:
+                if resp.status == 200: return (await resp.json(loads=ujson.loads)).get('url')
         except: return None
 
 class YouTubeEngine:
@@ -115,34 +111,31 @@ class YouTubeEngine:
         self.sem = asyncio.Semaphore(4)
 
     async def search_raw(self, query: str):
-        search_url = f"{PIPED_API_URL}/search"
-        params = {"q": query, "filter": "all"}
+        # filter="music_songs" - ВЕРНУЛИ ФИЛЬТР!
+        # "all" давал слишком много мусора (клипы, индусы, обзоры).
+        # music_songs ищет именно топики и официальные треки.
+        params = {"q": query, "filter": "music_songs"}
         
         async with self.sem:
             try:
-                async with self.session.get(search_url, params=params, timeout=4) as resp:
+                async with self.session.get(f"{PIPED_API_URL}/search", params=params, timeout=4) as resp:
                     if resp.status != 200: return []
                     data = await resp.json(loads=ujson.loads)
                     items = data.get('items', [])
                     del data
-                    
                     candidates = []
                     for item in items[:SEARCH_CANDIDATES_YT]:
                         try:
                             url_part = item.get('url', '')
-                            if "/watch?v=" in url_part: 
+                            if "watch?v=" in url_part: 
                                 vid_id = url_part.split("v=")[-1].split("&")[0]
-                            elif "/shorts/" in url_part: 
-                                vid_id = url_part.split("/shorts/")[-1]
                             else: continue
-
-                            uploader = item.get('uploaderName') or item.get('uploadername') or 'YouTube'
 
                             candidates.append({
                                 'source': 'YT',
                                 'id': vid_id,
                                 'title': item.get('title', ''),
-                                'artist': uploader,
+                                'artist': item.get('uploaderName') or 'YouTube',
                                 'playback_count': item.get('views', 0),
                                 'duration': item.get('duration', 0) * 1000 if isinstance(item.get('duration'), int) else 0,
                                 'artwork_url': item.get('thumbnail')
@@ -168,38 +161,32 @@ class MultiEngine:
         self.yt = YouTubeEngine(session)
 
     async def search(self, query: str, source_mode='all'):
-        # 1. Генерируем варианты (Оригинал + Транслит)
-        search_queries = get_translit_variants(query)
-        
+        # Просто один проход, без транслита
         tasks = []
-        for q in search_queries:
-            if source_mode in ['all', 'sc']:
-                tasks.append(asyncio.create_task(self.sc.search_raw(q)))
-            if source_mode in ['all', 'yt']:
-                tasks.append(asyncio.create_task(self.yt.search_raw(q)))
+        if source_mode in ['all', 'sc']:
+            tasks.append(asyncio.create_task(self.sc.search_raw(query)))
+        if source_mode in ['all', 'yt']:
+            tasks.append(asyncio.create_task(self.yt.search_raw(query)))
         
         if not tasks: return []
         
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        seen_ids = set()
         candidates = []
         for res in raw_results:
-            if isinstance(res, list):
-                for track in res:
-                    uid = f"{track['source']}_{track['id']}"
-                    if uid not in seen_ids:
-                        seen_ids.add(uid)
-                        candidates.append(track)
+            if isinstance(res, list): candidates.extend(res)
         
         if not candidates: return []
 
-        # Сортируем по ОРИГИНАЛЬНОМУ запросу
-        q_lower = query.lower().strip()
-        # Функция calculate_score сама внутри разберется с транслитом
-        for c in candidates: 
-            c['score'] = calculate_score(c, query) # Передаем query, не q_lower
+        # Фильтрация и Оценка
+        filtered = []
+        for c in candidates:
+            score = calculate_score(c, query)
+            # ВАЖНО: Если score отрицательный (бан или совсем не то) - не показываем
+            if score > 0:
+                c['score'] = score
+                filtered.append(c)
         
-        candidates.sort(key=lambda x: x['score'], reverse=True)
+        filtered.sort(key=lambda x: x['score'], reverse=True)
         gc.collect()
-        return candidates
+        return filtered
