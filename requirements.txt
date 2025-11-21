@@ -1,6 +1,6 @@
 aiogram
 aiohttp
-aiosqlite
+asyncpg
 ujson
 uvloop
 transliterate

@@ -52,6 +52,13 @@ async def send_ad(message: Message):
             if "Forbidden" in str(e): await mark_inactive(uid)
     await message.answer(f"Готово. Отправлено: {count}")
 
+@router.message(Command("stats"))
+async def cmd_stats(message: Message):
+    if message.from_user.id != ADMIN_ID: return
+    
+    users = await get_active_users()
+    await message.answer(f"📊 <b>Статистика:</b>\n\n👥 Пользователей в базе: <b>{len(users)}</b>", parse_mode="HTML")
+
 @router.message(Command("source"))
 async def cmd_source(message: Message):
     kb = types.InlineKeyboardMarkup(inline_keyboard=[

@@ -5,9 +5,24 @@ import re
 TG_TOKEN = os.getenv("TG_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 FALLBACK_CLIENT_ID = os.getenv("FALLBACK_CLIENT_ID", "LMlJPYvzQSVyjYv7faMQl9W7OjTBCaq4")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # ================= API =================
-PIPED_API_URL = "https://api.piped.private.coffee"
+# config.py
+
+# ... (Остальной код без изменений)
+
+# ================= API URLS =================
+# Список зеркал. Бот будет перебирать их, если одно упадет.
+PIPED_MIRRORS = [
+    "https://api.piped.private.coffee",  # Быстрое
+    "https://api.piped.bot",             # Основное
+    "https://pipedapi.kavin.rocks",      # Классика
+    "https://pipedapi.drgns.space",      # Запасное
+    "https://pipedapi.system41.com"      # Запасное
+]
+
+# ... (Лимиты и списки слов оставляем как были)
 
 # ================= LIMITS =================
 MAX_CONCURRENT_REQ = 6

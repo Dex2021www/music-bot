@@ -56,6 +56,12 @@ async def main():
         await session.close()
         await bot.session.close()
 
+                # Закрываем базу данных
+        from database import pool
+        if pool:
+            await pool.close()
+            print("📴 DB Connection closed")
+
 if __name__ == "__main__":
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

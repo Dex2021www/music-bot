@@ -104,55 +104,78 @@ class SoundCloudEngine:
                 if resp.status == 200: return (await resp.json(loads=ujson.loads)).get('url')
         except: return None
 
+# engines.py (В начале добавь импорт random)
+import random
+from config import PIPED_MIRRORS  # Импортируем список вместо одной ссылки
+
+# ... (SoundCloudEngine оставляем без изменений) ...
+
 class YouTubeEngine:
     __slots__ = ('session', 'sem')
     def __init__(self, session):
         self.session = session
         self.sem = asyncio.Semaphore(4)
 
+    async def _request(self, endpoint, params=None):
+        """Умная функция запроса с перебором зеркал"""
+        # Перемешиваем зеркала, чтобы не долбить одно и то же (Load Balancing)
+        mirrors = PIPED_MIRRORS.copy()
+        random.shuffle(mirrors)
+
+        for base_url in mirrors:
+            url = f"{base_url}{endpoint}"
+            try:
+                # Таймаут короткий (3 сек), чтобы быстро переключиться, если зеркало висит
+                async with self.session.get(url, params=params, timeout=3) as resp:
+                    if resp.status == 200:
+                        return await resp.json(loads=ujson.loads)
+                    # Если 429 (Too Many Requests) или 403 - пробуем следующее
+                    # print(f"⚠️ Mirror {base_url} failed: {resp.status}") 
+            except:
+                pass # Ошибка сети - пробуем следующее
+        return None
+
     async def search_raw(self, query: str):
-        # filter="music_songs" - ВЕРНУЛИ ФИЛЬТР!
-        # "all" давал слишком много мусора (клипы, индусы, обзоры).
-        # music_songs ищет именно топики и официальные треки.
-        params = {"q": query, "filter": "music_songs"}
+        params = {"q": query, "filter": "music_songs"} # Фильтр вернули, как договаривались
         
         async with self.sem:
-            try:
-                async with self.session.get(f"{PIPED_API_URL}/search", params=params, timeout=4) as resp:
-                    if resp.status != 200: return []
-                    data = await resp.json(loads=ujson.loads)
-                    items = data.get('items', [])
-                    del data
-                    candidates = []
-                    for item in items[:SEARCH_CANDIDATES_YT]:
-                        try:
-                            url_part = item.get('url', '')
-                            if "watch?v=" in url_part: 
-                                vid_id = url_part.split("v=")[-1].split("&")[0]
-                            else: continue
+            data = await self._request("/search", params)
+            
+            if not data: return [] # Все зеркала мертвы (маловероятно)
+            
+            items = data.get('items', [])
+            candidates = []
+            
+            for item in items[:SEARCH_CANDIDATES_YT]:
+                try:
+                    url_part = item.get('url', '')
+                    if "watch?v=" in url_part: 
+                        vid_id = url_part.split("v=")[-1].split("&")[0]
+                    else: continue
 
-                            candidates.append({
-                                'source': 'YT',
-                                'id': vid_id,
-                                'title': item.get('title', ''),
-                                'artist': item.get('uploaderName') or 'YouTube',
-                                'playback_count': item.get('views', 0),
-                                'duration': item.get('duration', 0) * 1000 if isinstance(item.get('duration'), int) else 0,
-                                'artwork_url': item.get('thumbnail')
-                            })
-                        except: continue
-                    return candidates
-            except: return []
+                    candidates.append({
+                        'source': 'YT',
+                        'id': vid_id,
+                        'title': item.get('title', ''),
+                        'artist': item.get('uploaderName') or 'YouTube',
+                        'playback_count': item.get('views', 0),
+                        'duration': item.get('duration', 0) * 1000 if isinstance(item.get('duration'), int) else 0,
+                        'artwork_url': item.get('thumbnail')
+                    })
+                except: continue
+            return candidates
 
     async def resolve_url(self, video_id):
+        # Для получения ссылки тоже перебираем зеркала
+        data = await self._request(f"/streams/{video_id}")
+        
+        if not data: return None
+        
         try:
-            async with self.session.get(f"{PIPED_API_URL}/streams/{video_id}", timeout=5) as resp:
-                if resp.status != 200: return None
-                data = await resp.json(loads=ujson.loads)
-                streams = data.get('audioStreams', [])
-                best = next((s for s in streams if s.get('format') == 'M4A'), None)
-                if not best and streams: best = streams[0]
-                return best['url'] if best else None
+            streams = data.get('audioStreams', [])
+            best = next((s for s in streams if s.get('format') == 'M4A'), None)
+            if not best and streams: best = streams[0]
+            return best['url'] if best else None
         except: return None
 
 class MultiEngine:

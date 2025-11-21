@@ -1,115 +1,96 @@
 import math
-import difflib
-from config import BANNED_WORDS, NOISE_WORDS, SEARCH_STOP_WORDS, BRACKETS_RE, ALPHANUM_RE
+from config import TRASH_WORDS, SEARCH_STOP_WORDS
 
 def format_plays(count):
+    """Красивое число (1.5M, 300K)"""
     if not count: return ""
     if count >= 1_000_000: return f"{count / 1_000_000:.1f}M"
     if count >= 1_000: return f"{count / 1_000:.0f}K"
     return f"{count}"
 
-def normalize_text(text):
-    """Превращает 'Morgenshtern - Cadillac (Official Video)' в 'morgenshtern cadillac'"""
-    if not text: return ""
+def clean_query(text):
+    """Удаляет мусор типа 'скачать', 'mp3' из запроса"""
     text = text.lower()
+    words = text.split()
+    # Оставляем только слова, которых НЕТ в стоп-листе
+    clean_words = [w for w in words if w not in SEARCH_STOP_WORDS]
     
-    # 1. Вырезаем всё в скобках (обычно там мусор типа feat. или Official)
-    # Но делаем это аккуратно: иногда в скобках важная часть названия
-    # Для простоты пока просто чистим известные мусорные фразы
-    for word in NOISE_WORDS:
-        text = text.replace(word, "")
-    
-    # 2. Убираем спецсимволы
-    text = ALPHANUM_RE.sub(' ', text)
-    return text.strip()
-
-def clean_user_query(text):
-    """Чистит запрос пользователя"""
-    words = text.lower().split()
-    clean = [w for w in words if w not in SEARCH_STOP_WORDS]
-    return " ".join(clean) if clean else text.lower()
-
-def is_banned(title, query):
-    """Проверяет, нет ли в названии запрещенных слов (реакция, кавер)"""
-    title_lower = title.lower()
-    query_lower = query.lower()
-    
-    for bad_word in BANNED_WORDS:
-        # Баним, ТОЛЬКО если юзер сам не написал это слово
-        if bad_word in title_lower and bad_word not in query_lower:
-            return True
-    return False
+    # Если после чистки ничего не осталось (юзер написал просто "скачать"), возвращаем оригинал
+    if not clean_words: return text
+    return " ".join(clean_words)
 
 def calculate_score(item, query_raw):
     """
-    ALGORITHM V5 'CERBERUS'
-    Приоритет: Точность > Артист > Популярность
+    LEGACY V3 LOGIC:
+    1. Точное совпадение слов = Огромный бонус.
+    2. Популярность = Огромный бонус.
+    3. Никаких скрытых фильтров.
     """
-    
-    # 1. ПРЕДВАРИТЕЛЬНАЯ ПРОВЕРКА
-    # Если трек — это "Реакция на клип", а мы искали песню — удаляем нафиг (score = -1000)
-    if is_banned(item['title'], query_raw):
-        return -1000
-
-    # Подготовка данных
-    query_clean = clean_user_query(query_raw)
-    
-    # Формируем "чистую строку" трека: Артист + Название
-    raw_full = f"{item['artist']} {item['title']}"
-    track_clean = normalize_text(raw_full)
-    
-    # 2. ТЕКСТОВОЕ СРАВНЕНИЕ (Fuzzy Logic)
-    # Используем ratio(), он вернет число от 0.0 до 1.0
-    matcher = difflib.SequenceMatcher(None, query_clean, track_clean)
-    similarity = matcher.ratio() # Общая похожесть
-    
-    # Поиск подстроки (если запрос короткий, а название длинное)
-    # Например: q="Numb", track="Linkin Park - Numb" -> ratio будет низким, но вхождение 100%
-    is_substring = query_clean in track_clean
-    
-    # --- СИСТЕМА ОЧКОВ ---
     score = 0
     
-    # База: Очки за похожесть (0...100)
-    score += similarity * 100
+    # Подготовка данных
+    query_clean = clean_query(query_raw)
+    query_words = set(query_clean.split())
     
-    # Бонус за полное вхождение фразы
-    if is_substring:
-        score += 50
-
-    # 3. ГЛАВНЫЙ ФИЛЬТР (THRESHOLD)
-    # Если сходство меньше 30% и это не подстрока — это мусор.
-    if similarity < 0.3 and not is_substring:
-        return -500 # Скрываем трек
-
-    # 4. АРТИСТ (Artist Bias)
-    # Если первое слово запроса совпадает с Артистом — это супер важно
-    # q="Morgenshtern", artist="Morgenshtern"
-    query_first_word = query_clean.split()[0] if query_clean else ""
-    artist_clean = normalize_text(item['artist'])
+    # Полный текст трека (Название + Артист)
+    title_lower = item['title'].lower()
+    artist_lower = item['artist'].lower()
+    full_text = f"{artist_lower} {title_lower}"
     
-    if query_first_word and query_first_word in artist_clean:
-        score += 40
+    # Разбиваем трек на слова (убираем запятые и скобки для простоты)
+    import re
+    # Оставляем только буквы и цифры для разбиения на слова
+    item_words = set(re.findall(r'\w+', full_text))
 
-    # 5. ПОПУЛЯРНОСТЬ (Soft Logarithm)
-    # Мы используем логарифм, чтобы сгладить разницу.
-    # 1000 прослушиваний = 9 очков
-    # 1 млн прослушиваний = 18 очков
-    # 100 млн прослушиваний = 24 очка
-    # Максимальный буст от популярности ограничен 30 очками.
-    # Это не даст популярному "индусу" перебить точное совпадение (которое дает 100+ очков).
+    # --- 1. СОВПАДЕНИЕ СЛОВ (WORD COVERAGE) ---
+    # Это самое важное. Если я ищу "Faceless Ask Eternity", я хочу трек, где есть эти 3 слова.
+    
+    if not query_words:
+        return 0
+
+    common_words = query_words.intersection(item_words)
+    coverage = len(common_words) / len(query_words)
+
+    if coverage == 1.0:      
+        score += 300  # КОРОЛЕВСКИЙ БОНУС (Все слова найдены)
+    elif coverage >= 0.66:   
+        score += 100  # Найдено 2 из 3 слов
+    elif coverage > 0:
+        score += 50   # Найдено хоть что-то
+    else:
+        return -100   # Вообще нет совпадений слов -> в конец списка
+
+    # --- 2. ТОЧНАЯ ФРАЗА ---
+    # Бонус, если слова идут именно в том порядке, как в запросе
+    if query_clean in full_text:
+        score += 100
+
+    # --- 3. ПОПУЛЯРНОСТЬ (HEAVY WEIGHT) ---
+    # Чтобы Моргенштерн (100М) побеждал каверы (1К), даже если слова совпали у обоих.
     plays = item.get('playback_count', 0) or 0
     if plays > 0:
-        pop_score = math.log10(plays) * 3 
-        score += min(pop_score, 30) # Кап (потолок) в 30 очков
+        try:
+            # Log10(100M) = 8.   8 * 20 = 160 очков.
+            # Log10(1000) = 3.   3 * 20 = 60 очков.
+            # Разница в 100 очков. Это мощно, но не перебьет "Полное совпадение слов" (300 очков).
+            score += math.log10(plays) * 20
+        except: pass
 
-    # 6. БОНУС ИСТОЧНИКА (SC надежнее для аудио)
+    # --- 4. БОНУС ЗА SC ---
     if item.get('source') == 'SC':
-        score += 10
+        score += 20
 
-    # 7. ШТРАФ ЗА ДЛИТЕЛЬНОСТЬ
+    # --- 5. ШТРАФЫ ---
     dur = item.get('duration', 0) / 1000
     if dur < 40: score -= 50    # Рингтоны
-    elif dur > 600: score -= 20 # Сеты
+    elif dur > 900: score -= 30 # Сеты
+
+    # Штраф за ремиксы/каверы, ТОЛЬКО если юзер сам не написал "remix"
+    is_clean_search = not any(w in query_clean for w in TRASH_WORDS)
+    
+    if is_clean_search:
+        for bad in TRASH_WORDS:
+            if bad in title_lower:
+                score -= 50 # Сильный штраф за мусор
 
     return score
