@@ -8,7 +8,6 @@ FALLBACK_CLIENT_ID = os.getenv("FALLBACK_CLIENT_ID", "LMlJPYvzQSVyjYv7faMQl9W7Oj
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # API URLS (PIPED MIRRORS)
-# Добавили больше зеркал, так как они часто падают
 PIPED_MIRRORS = [
     "https://pipedapi.kavin.rocks",
     "https://api.piped.yt",
@@ -20,11 +19,10 @@ PIPED_MIRRORS = [
 
 # LIMITS
 MAX_CONCURRENT_REQ = 5
-SEARCH_CANDIDATES_SC = 60
-# Увеличиваем выборку YouTube, чтобы было из чего выбирать
+SEARCH_CANDIDATES_SC = 50
 SEARCH_CANDIDATES_YT = 50 
 FINAL_LIMIT = 10
-INLINE_LIMIT = 10
+INLINE_LIMIT = 5  # <--- ВАЖНО: Снизили до 5, чтобы успевать получать ссылки
 CACHE_TTL = 600
 
 # REGEX

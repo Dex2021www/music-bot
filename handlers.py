@@ -12,11 +12,6 @@ router = Router()
 
 engine = None
 bot_instance = None 
-
-# ОПТИМИЗАЦИЯ RAM:
-# Храним настройки только 1000 последних активных пользователей.
-# Если юзера нет в кэше, считаем 'all'.
-# TTL = 1 час.
 USER_SOURCES = TTLCache(maxsize=1000, ttl=3600)
 
 def setup_handlers(main_engine, main_bot):
@@ -28,7 +23,6 @@ def setup_handlers(main_engine, main_bot):
 
 @router.message(Command("start"))
 async def start_command(message: Message):
-    # Fire and forget (не ждем записи в БД)
     asyncio.create_task(add_user(message.from_user.id))
     await message.answer(
         "<b>Музыкальный бот</b>\n\n"
@@ -48,7 +42,6 @@ async def send_ad(message: Message):
     msg = await message.answer("🚀 Начинаю рассылку (cursor mode)...")
     
     count = 0
-    # Используем курсор, чтобы не грузить всех юзеров в RAM
     conn_ctx = await get_active_users_cursor()
     if not conn_ctx:
         await msg.edit_text("❌ Нет соединения с БД")
@@ -56,15 +49,12 @@ async def send_ad(message: Message):
 
     try:
         async with conn_ctx as connection:
-            # Создаем транзакцию для курсора
             async with connection.transaction():
-                # Читаем пачками по 100 штук
                 async for record in connection.cursor("SELECT user_id FROM users WHERE is_active = TRUE"):
                     uid = record['user_id']
                     try:
                         await bot_instance.send_message(uid, text)
                         count += 1
-                        # Небольшая пауза, чтобы не словить FloodWait от Telegram
                         await asyncio.sleep(0.05) 
                     except Exception as e:
                         err = str(e)
@@ -72,7 +62,7 @@ async def send_ad(message: Message):
                             asyncio.create_task(mark_inactive(uid))
                     
                     if count % 100 == 0:
-                        await asyncio.sleep(1) # Даем передышку CPU и сети
+                        await asyncio.sleep(1)
     except Exception as e:
         await message.answer(f"Ошибка рассылки: {e}")
     
@@ -81,7 +71,6 @@ async def send_ad(message: Message):
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
     if message.from_user.id != ADMIN_ID: return
-    # Count делается в БД, в RAM прилетает только одно число
     count = await get_users_count()
     await message.answer(f"📊 Пользователей в базе: <b>{count}</b>", parse_mode="HTML")
 
@@ -92,7 +81,6 @@ async def cmd_source(message: Message):
         [types.InlineKeyboardButton(text="☁️ Только SoundCloud", callback_data="src_sc")],
         [types.InlineKeyboardButton(text="▶️ Только YouTube", callback_data="src_yt")]
     ])
-    # По умолчанию 'all', если нет в кэше
     current = USER_SOURCES.get(message.from_user.id, 'all').upper()
     await message.answer(f"⚙️ <b>Фильтр поиска</b>\nСейчас: {current}", reply_markup=kb, parse_mode="HTML")
 
@@ -110,7 +98,6 @@ async def search_handler(message: Message):
     query = message.text.strip()
     if len(query) < 2: return
 
-    # Fire-and-forget добавление юзера
     asyncio.create_task(add_user(message.from_user.id))
     mode = USER_SOURCES.get(message.from_user.id, 'all')
     
@@ -134,10 +121,7 @@ async def search_handler(message: Message):
         clean_title = item['title'].replace(item['artist'], "").strip(" -|")
         if not clean_title: clean_title = item['title']
         
-        # Лимитируем длину строки в RAM
         res_text += f"<b>{num}.</b> {icon} {item['artist']} — {clean_title[:40]}\n"
-        
-        # Используем короткий callback data
         btn = types.InlineKeyboardButton(text=f"{num}", callback_data=f"dl|{item['source']}|{item['id']}")
         
         if i < 5: buttons_row_1.append(btn)
@@ -152,7 +136,6 @@ async def search_handler(message: Message):
 @router.callback_query(lambda c: c.data.startswith("dl|"))
 async def download_callback(call: CallbackQuery):
     _, source, item_id = call.data.split("|")
-    # Сразу даем фидбек, чтобы телеграм не крутил часики
     await call.answer("🚀 Загружаю...")
     
     try:
@@ -174,13 +157,19 @@ async def download_callback(call: CallbackQuery):
     except Exception:
         await call.message.answer("❌ Ошибка отправки файла.")
 
+# ИСПРАВЛЕННЫЙ INLINE HANDLER
 @router.inline_query()
 async def inline_handler(query: InlineQuery):
     text = query.query.strip()
     if len(text) < 2: return
     
     mode = USER_SOURCES.get(query.from_user.id, 'all')
+    
+    # 1. Поиск (метаданные) - это быстро
     all_results = await engine.search(text, mode)
+    
+    # 2. Берем ТОЛЬКО лимит из конфига (5 штук)
+    # Если брать 10-20, мы никогда не успеем получить ссылки от YouTube
     top_results = all_results[:INLINE_LIMIT]
     
     tasks = []
@@ -190,10 +179,18 @@ async def inline_handler(query: InlineQuery):
         else: 
             tasks.append(engine.yt.resolve_url(item['id']))
             
-    urls = await asyncio.gather(*tasks, return_exceptions=True)
+    # 3. Ждем ссылки с жестким таймаутом.
+    # Telegram дает на ответ инлайн-бота мало времени.
+    # Если за 8 секунд не успели - отдаем то, что есть, или ничего.
+    try:
+        urls = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=8.0)
+    except asyncio.TimeoutError:
+        return # Время вышло, не отвечаем (чтобы не было вечной загрузки)
+        
     iq_results = []
     
     for item, real_url in zip(top_results, urls):
+        # Фильтруем ошибки и пустые ссылки
         if not real_url or not isinstance(real_url, str): continue
         
         res_id = hashlib.md5(f"{item['source']}_{item['id']}".encode()).hexdigest()
@@ -205,9 +202,9 @@ async def inline_handler(query: InlineQuery):
             title=item['title'],
             performer=f"{icon} {item['artist']}",
             audio_duration=int(item['duration'] / 1000)
-            # Убрал artwork, иногда они тяжелые и ломают инлайн превью, если URL кривой
         ))
         
     try: 
-        await query.answer(iq_results, cache_time=300, is_personal=True)
+        # cache_time=10, чтобы если юзер повторит запрос, мы попробовали снова (вдруг зеркало ожило)
+        await query.answer(iq_results, cache_time=10, is_personal=True)
     except: pass
