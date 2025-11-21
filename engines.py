@@ -183,34 +183,43 @@ class MultiEngine:
         self.yt = YouTubeEngine(session)
 
     async def search(self, query: str, source_mode='all'):
+        # 1. Генерируем варианты запроса (Оригинал + Транслит)
+        # "кадиллак" -> ["кадиллак", "kadillak"]
+        search_queries = get_translit_variants(query)
+        
+        # 2. Создаем задачи для поиска
         tasks = []
-        if source_mode in ['all', 'sc']:
-            tasks.append(asyncio.create_task(self.sc.search_raw(query)))
-        if source_mode in ['all', 'yt']:
-            tasks.append(asyncio.create_task(self.yt.search_raw(query)))
+        for q in search_queries:
+            if source_mode in ['all', 'sc']:
+                tasks.append(asyncio.create_task(self.sc.search_raw(q)))
+            if source_mode in ['all', 'yt']:
+                tasks.append(asyncio.create_task(self.yt.search_raw(q)))
         
         if not tasks: return []
         
-        # Ждем результаты от всех движков
+        # 3. Ждем все результаты
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
         
+        # 4. Собираем всё в одну кучу и убираем дубликаты
+        seen_ids = set()
         candidates = []
+        
         for res in raw_results:
-            if isinstance(res, list): candidates.extend(res)
+            if isinstance(res, list):
+                for track in res:
+                    # Уникальный ключ: Источник + ID
+                    uid = f"{track['source']}_{track['id']}"
+                    if uid not in seen_ids:
+                        seen_ids.add(uid)
+                        candidates.append(track)
         
         if not candidates: return []
 
-        # Подготовка к сортировке
-        q_lower = query.lower().strip()
-        q_words = set(q_lower.split())
-        
-        # Оцениваем каждый трек
+        # 5. Сортировка (передаем ОРИГИНАЛЬНЫЙ запрос юзера)
+        # Функция calculate_score сама внутри проверит транслит
         for c in candidates: 
-            c['score'] = calculate_score(c, q_lower, q_words)
+            c['score'] = calculate_score(c, query)
         
-        # Сортируем: у кого больше очков - тот выше
         candidates.sort(key=lambda x: x['score'], reverse=True)
-        
-        # Чистим память
         gc.collect()
         return candidates
