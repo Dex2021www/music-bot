@@ -3,11 +3,12 @@ import aiohttp
 import ujson
 import logging
 import gc
+import random
 from config import (
     MAX_CONCURRENT_REQ, SEARCH_CANDIDATES_SC, SEARCH_CANDIDATES_YT,
     PIPED_MIRRORS, FALLBACK_CLIENT_ID, BAD_CHARS_RE
 )
-from utils import calculate_score, format_plays
+from utils import calculate_score
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +47,11 @@ class SoundCloudEngine:
 
     async def search_raw(self, query: str):
         client_id = self.key_manager.get_id()
-        # Ищем много, фильтруем жестко в utils
         params = {"q": query, "client_id": client_id, "limit": SEARCH_CANDIDATES_SC, "app_version": "1699953100"}
         
         async with self.sem:
             try:
-                async with self.session.get("https://api-v2.soundcloud.com/search/tracks", params=params, timeout=3) as resp:
+                async with self.session.get("https://api-v2.soundcloud.com/search/tracks", params=params, timeout=4) as resp:
                     if resp.status == 401:
                         asyncio.create_task(self.key_manager.fetch_new_key())
                         return []
@@ -64,7 +64,6 @@ class SoundCloudEngine:
                     for item in raw:
                         if not item.get('streamable'): continue
                         title = item.get('title', '')
-                        # Жесткий фильтр иероглифов
                         if len(title) > 150 or BAD_CHARS_RE.search(title): continue
                         
                         prog_url = next((t['url'] for t in item.get('media', {}).get('transcodings', []) 
@@ -89,7 +88,7 @@ class SoundCloudEngine:
         client_id = self.key_manager.get_id()
         try:
             info_url = f"https://api-v2.soundcloud.com/tracks/{track_id}"
-            async with self.session.get(info_url, params={"client_id": client_id}, timeout=3) as resp:
+            async with self.session.get(info_url, params={"client_id": client_id}, timeout=4) as resp:
                 if resp.status != 200: return None
                 data = await resp.json(loads=ujson.loads)
                 prog_url = next((t['url'] for t in data.get('media', {}).get('transcodings', []) 
@@ -100,12 +99,9 @@ class SoundCloudEngine:
 
     async def resolve_url(self, url: str):
         try:
-            async with self.session.get(url, params={"client_id": self.key_manager.get_id()}, timeout=3) as resp:
+            async with self.session.get(url, params={"client_id": self.key_manager.get_id()}, timeout=4) as resp:
                 if resp.status == 200: return (await resp.json(loads=ujson.loads)).get('url')
         except: return None
-
-import random
-from config import PIPED_MIRRORS  # Импортируем список вместо одной ссылки
 
 class YouTubeEngine:
     __slots__ = ('session', 'sem')
@@ -114,31 +110,29 @@ class YouTubeEngine:
         self.sem = asyncio.Semaphore(4)
 
     async def _request(self, endpoint, params=None):
-        """Умная функция запроса с перебором зеркал"""
-        # Перемешиваем зеркала, чтобы не долбить одно и то же
         mirrors = PIPED_MIRRORS.copy()
         random.shuffle(mirrors)
 
         for base_url in mirrors:
             url = f"{base_url}{endpoint}"
             try:
-                # Таймаут короткий (3 сек), чтобы быстро переключиться, если зеркало висит
-                async with self.session.get(url, params=params, timeout=3) as resp:
+                # Увеличил таймаут до 4 сек, некоторые зеркала медленные
+                async with self.session.get(url, params=params, timeout=4) as resp:
                     if resp.status == 200:
                         return await resp.json(loads=ujson.loads)
-                    # Если 429 (Too Many Requests) или 403 - пробуем следующее
-                    # print(f" Mirror {base_url} failed: {resp.status}") 
             except:
-                pass # Ошибка сети - пробуем следующее
+                pass 
         return None
 
     async def search_raw(self, query: str):
-        params = {"q": query, "filter": "music_songs"} # Фильтр вернули, как договаривались
+        # ИЗМЕНЕНИЕ: filter="videos" вместо "music_songs".
+        # "videos" ищет всё, а фильтровать мусор будем сами по названию/длине
+        params = {"q": query, "filter": "videos"}
         
         async with self.sem:
             data = await self._request("/search", params)
             
-            if not data: return [] # Все зеркала мертвы (маловероятно)
+            if not data: return []
             
             items = data.get('items', [])
             candidates = []
@@ -163,11 +157,8 @@ class YouTubeEngine:
             return candidates
 
     async def resolve_url(self, video_id):
-        # Для получения ссылки тоже перебираем зеркала
         data = await self._request(f"/streams/{video_id}")
-        
         if not data: return None
-        
         try:
             streams = data.get('audioStreams', [])
             best = next((s for s in streams if s.get('format') == 'M4A'), None)
@@ -181,7 +172,6 @@ class MultiEngine:
         self.yt = YouTubeEngine(session)
 
     async def search(self, query: str, source_mode='all'):
-        # Просто один проход, без транслита
         tasks = []
         if source_mode in ['all', 'sc']:
             tasks.append(asyncio.create_task(self.sc.search_raw(query)))
@@ -192,21 +182,45 @@ class MultiEngine:
         
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        candidates = []
-        for res in raw_results:
-            if isinstance(res, list): candidates.extend(res)
-        
-        if not candidates: return []
+        sc_candidates = []
+        yt_candidates = []
 
-        # Фильтрация и Оценка
-        filtered = []
-        for c in candidates:
-            score = calculate_score(c, query)
-            # ВАЖНО: Если score отрицательный (бан или совсем не то) - не показываем
-            if score > 0:
-                c['score'] = score
-                filtered.append(c)
+        # Разделяем результаты по спискам
+        for i, res in enumerate(raw_results):
+            if isinstance(res, list):
+                if source_mode == 'all':
+                    # Если запущено оба, 0 - SC, 1 - YT (по порядку добавления в tasks)
+                    if i == 0: sc_candidates = res
+                    else: yt_candidates = res
+                elif source_mode == 'sc': sc_candidates = res
+                elif source_mode == 'yt': yt_candidates = res
+
+        # Фильтрация и оценка
+        def process_list(candidates):
+            processed = []
+            for c in candidates:
+                score = calculate_score(c, query)
+                if score > 0:
+                    c['score'] = score
+                    processed.append(c)
+            processed.sort(key=lambda x: x['score'], reverse=True)
+            return processed
+
+        sc_final = process_list(sc_candidates)
+        yt_final = process_list(yt_candidates)
+
+        # ЛОГИКА СМЕШИВАНИЯ (Interleaving)
+        # Если режим 'all', мы чередуем: 1 SC, 1 YT, 1 SC, 1 YT...
+        # Это гарантирует, что YouTube будет виден
+        final_results = []
         
-        filtered.sort(key=lambda x: x['score'], reverse=True)
+        if source_mode == 'all':
+            max_len = max(len(sc_final), len(yt_final))
+            for i in range(max_len):
+                if i < len(sc_final): final_results.append(sc_final[i])
+                if i < len(yt_final): final_results.append(yt_final[i])
+        else:
+            final_results = sc_final + yt_final
+
         gc.collect()
-        return filtered
+        return final_results
