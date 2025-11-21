@@ -1,5 +1,6 @@
 import math
 import difflib
+import re
 from transliterate import translit
 from config import TRASH_WORDS, NOISE_WORDS, SEARCH_STOP_WORDS
 
@@ -10,102 +11,127 @@ def format_plays(count):
     return f"{count}"
 
 def get_translit_variants(text):
-    """Возвращает список: [Оригинал, Транслит]"""
-    variants = {text.lower()} # Используем set, чтобы убрать дубли
+    """
+    Генерирует варианты: 
+    1. Оригинал ("кадиллак")
+    2. Транслит ("kadillak")
+    """
+    variants = {text.lower()}
     try:
-        # Пытаемся превратить кириллицу в латиницу (Кадиллак -> Kadillak)
+        # Пытаемся русский -> латиница
         tr = translit(text, 'ru', reversed=True)
         variants.add(tr.lower())
     except: pass
     return list(variants)
 
 def clean_query(text):
+    """Убирает слова типа 'скачать', 'mp3'"""
     words = text.lower().split()
     clean_words = [w for w in words if w not in SEARCH_STOP_WORDS]
     if not clean_words: return text.lower()
     return " ".join(clean_words)
 
 def clean_title(text):
+    """Убирает (Official Video) и спецсимволы для чистого сравнения"""
     text = text.lower()
-    for w in NOISE_WORDS: text = text.replace(w, "")
-    return text.strip()
+    for w in NOISE_WORDS: 
+        text = text.replace(w, "")
+    # Оставляем только буквы и цифры для сравнения
+    return re.sub(r'[^\w\s]', '', text).strip()
 
 def calculate_score(item, query_raw):
-    """
-    Теперь функция принимает query_raw (исходный текст), 
-    а внутри сама генерирует варианты транслита для сравнения.
-    """
     score = 0
     
-    # Данные трека
+    # --- ПОДГОТОВКА ДАННЫХ ---
     raw_title = item['title'].lower()
     clean_t = clean_title(raw_title)
-    artist_raw = item['artist'].lower()
-    full_text = f"{clean_t} {artist_raw}"
+    artist_lower = item['artist'].lower()
+    
+    # Полный текст трека (чистый)
+    full_text = f"{artist_lower} {clean_t}"
     item_words = set(full_text.split())
 
-    # Данные запроса (Генерируем варианты: 'кадиллак' и 'kadillak')
+    # Подготовка запроса
     query_clean = clean_query(query_raw)
+    # Получаем варианты (оригинал + транслит)
     query_variants = get_translit_variants(query_clean)
 
-    # --- 1. МАКСИМАЛЬНОЕ ПОКРЫТИЕ ---
-    # Мы проверяем каждый вариант запроса и берем ЛУЧШИЙ результат совпадения
-    max_coverage = 0
+    # --- 1. ТЕКСТОВОЕ СОВПАДЕНИЕ (Coverage) ---
+    best_coverage = 0
     
     for q_var in query_variants:
-        q_words = set(q_var.split())
+        # Чистим вариант запроса от спецсимволов тоже
+        q_clean = re.sub(r'[^\w\s]', '', q_var)
+        q_words = set(q_clean.split())
         if not q_words: continue
         
         common = q_words.intersection(item_words)
         cov = len(common) / len(q_words)
         
-        # Доп. бонус: если слова похожи (Fuzzy match), но не равны (Kadillak != Cadillac)
-        # difflib поможет найти схожесть
-        if cov == 0 and len(q_words) == 1 and len(item_words) > 0:
-             # Сравниваем одно слово запроса с каждым словом трека
-             for w in item_words:
-                 if difflib.SequenceMatcher(None, list(q_words)[0], w).ratio() > 0.8:
-                     cov = 0.9 # Почти точное совпадение
-                     break
+        if cov > best_coverage:
+            best_coverage = cov
 
-        if cov > max_coverage:
-            max_coverage = cov
+    # Начисляем очки (Максимум 200)
+    if best_coverage == 1.0: score += 200
+    elif best_coverage >= 0.75: score += 100
+    elif best_coverage >= 0.5: score += 50
+    else: score += 10
 
-    # Начисляем очки за лучшее совпадение
-    if max_coverage >= 1.0: score += 200
-    elif max_coverage >= 0.75: score += 80
-    elif max_coverage >= 0.5: score += 40
-    else: score += 10  # Минимальный балл
+    # --- 2. ТОЧНАЯ ФРАЗА (Exact Match) ---
+    # Бонус, если слова идут в правильном порядке
+    # Даем приоритет ОРИГИНАЛЬНОМУ запросу (+80), транслиту чуть меньше (+50)
+    if query_clean in full_text:
+        score += 80
+    else:
+        # Проверяем транслит варианты
+        for q_var in query_variants:
+            if q_var != query_clean and q_var in full_text:
+                score += 50
+                break
 
-    # --- 2. ТОЧНАЯ ФРАЗА ---
+    # --- 3. АРТИСТ (Artist Bonus) ---
+    # Если имя артиста есть в запросе - это очень важно
     for q_var in query_variants:
-        if q_var in full_text:
+        if artist_lower in q_var or q_var in artist_lower:
             score += 60
             break
 
-    # --- 3. АРТИСТ ---
-    # Проверяем, есть ли артист в любом из вариантов запроса
-    for q_var in query_variants:
-        if artist_raw in q_var:
-            score += 40
-            break
-
-    # --- 4. ПОПУЛЯРНОСТЬ ---
+    # --- 4. ПОПУЛЯРНОСТЬ (HEAVY WEIGHT) ---
+    # ТЕПЕРЬ ЭТО РЕШАЮЩИЙ ФАКТОР
     plays = item.get('playback_count', 0) or 0
+    is_viral = False
+    
     if plays > 0:
-        try: score += math.log10(plays) * 15
+        try:
+            # Log10(100M) = 8.   8 * 30 = 240 очков!
+            # Log10(10K) = 4.    4 * 30 = 120 очков.
+            # Разница в 120 очков перебьет любые мелкие несовпадения текста.
+            score += math.log10(plays) * 30
+            
+            # БОНУС ЗА ХИТ (> 5 млн)
+            if plays > 5_000_000:
+                is_viral = True
+                score += 50  # Несгораемый бонус "Легенда"
         except: pass
 
-    # --- 5. ИСТОЧНИК & ШТРАФЫ ---
+    # --- 5. ИСТОЧНИК ---
     if item.get('source') == 'SC': score += 15
 
+    # --- 6. ШТРАФЫ ---
     dur_sec = item.get('duration', 0) / 1000
-    if dur_sec < 45: score -= 30
-    elif dur_sec > 900: score -= 20
-    else: score += 5
+    
+    # Фильтр длительности
+    if dur_sec < 45: score -= 50
+    elif dur_sec > 900: score -= 30
+    else: score += 10
 
+    # Фильтр ремиксов (не штрафуем Хиты!)
     if not any(w in query_clean for w in TRASH_WORDS):
         for bad in TRASH_WORDS:
-            if bad in raw_title: score -= 30
+            if bad in raw_title:
+                if is_viral:
+                    score += 10 # Хит-ремикс (Roses Imanbek) - поощряем
+                else:
+                    score -= 50 # Мусор-ремикс - караем жестко
 
     return score

@@ -2,7 +2,7 @@ import os
 import re
 
 # ================= TOKENS & KEYS =================
-# Токены берутся из переменных окружения (Environment Variables)
+# Токены берутся из переменных окружения
 # Это безопасно для GitHub
 TG_TOKEN = os.getenv("TG_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
@@ -50,12 +50,17 @@ NOISE_WORDS = [
 # Если этих слов нет в запросе юзера, но они есть в названии трека -> понижаем рейтинг.
 TRASH_WORDS = {
     'slowed', 'reverb', 'remix', 'cover', 'bassboosted', 'tik tok',
-    'speed up', 'nightcore', 'live', 'concert', 'instrumental', 'karaoke', 'edit', 'sped up'
+    'speed up', 'nightcore', 'live', 'concert', 'instrumental', 'karaoke', 'edit', 'sped up', 
+    'download', 'free', 'free download', 'remastered', 'reaction', 'meme', 'parody', 'amv', 'fanmade',
+    'bootleg', 'mashup', 'dj mix', 'dj set', 'compilation', 'medley', 'mash up', 'lyric video', 
+    'visualizer', 'audiovisualizer', 'audio visualizer', 'slowed + reverb', 'slowed reverb',
+    'bass'
 }
 
 # Стоп-слова для поиска.
 # Если юзер пишет "скачать моргенштерн", мы удаляем слово "скачать", чтобы искать только артиста.
 SEARCH_STOP_WORDS = {
     'скачать', 'download', 'mp3', 'music', 'музыка', 'песня', 'song',
-    'track', 'трек', 'слушать', 'listen', 'free', 'бесплатно', 'audio', 'аудио'
+    'track', 'трек', 'слушать', 'listen', 'free', 'бесплатно', 'audio', 'аудио', 'video', 'видео',
+    'official', 'офиц', 'клип', 'clip'
 }
