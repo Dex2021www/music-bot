@@ -6,7 +6,8 @@ from aiogram.types import (
     URLInputFile
 )
 from aiogram.exceptions import TelegramBadRequest
-from config import INLINE_LIMIT, DUMP_CHANNEL_ID, DUMP_CHANNEL_USERNAME, DEFAULT_ICON_URL
+# УБРАЛ DEFAULT_ICON_URL из импорта ниже
+from config import INLINE_LIMIT, DUMP_CHANNEL_ID, DUMP_CHANNEL_USERNAME
 from database import get_cached_info, save_cached_info
 from utils import format_plays
 
@@ -36,6 +37,7 @@ async def inline_handler(query: InlineQuery):
         if not clean_title: clean_title = item['title']
         
         m, s = divmod(item['duration'] // 1000, 60)
+        # Если картинки нет, будет None (Телеграм покажет просто текст)
         thumb = item.get('artwork_url') 
 
         iq_results.append(InlineQueryResultArticle(
@@ -56,7 +58,7 @@ async def inline_handler(query: InlineQuery):
 
 # УМНАЯ ЗАГРУЗКА (STEALTH v2.0)
 async def fast_swap(im_id, source, item_id):
-    # 1. ПРОВЕРЯЕМ КЭШ (Если файл уже был в канале - это идеально)
+    # 1. ПРОВЕРЯЕМ КЭШ
     cached = await get_cached_info(source, item_id)
     file_id = cached.get('file_id') if cached else None
     msg_id = cached.get('message_id') if cached else None
@@ -74,24 +76,20 @@ async def fast_swap(im_id, source, item_id):
                 return
         except: return
 
-    # Подготовка метаданных (ОБЯЗАТЕЛЬНО для красивого вида)
-    # Если есть track (мы только что нашли), берем из него. Если file_id (из кэша), берем дефолт.
+    # Подготовка метаданных
     title = track['title'][:100] if track else "Track"
     performer = track['artist'][:64] if track else "Artist"
     
-    # Чистим имя файла от мусора
+    # Чистим имя файла
     safe_filename = f"{performer} - {title}.mp3".replace('/', '').replace('\\', '').replace('"', '')
     
     thumb_url = track.get('thumbnail') if track else None
-    
-    # Объект обложки (если есть)
     thumb_obj = URLInputFile(thumb_url) if thumb_url else None
 
-    # Объект аудио (URL или ID)
+    # Выбираем источник: ID или URL
     if file_id:
         media_obj = file_id
     else:
-        # ВАЖНО: filename тут помогает Телеграму понять, как назвать файл при скачивании
         media_obj = URLInputFile(track['url'], filename=safe_filename)
 
     # 2. ПОПЫТКА 1: STEALTH (Напрямую в чат)
@@ -101,41 +99,34 @@ async def fast_swap(im_id, source, item_id):
             media=InputMediaAudio(
                 media=media_obj,
                 thumbnail=thumb_obj,
-                title=title,        # <-- Заголовок в плеере
-                performer=performer,# <-- Артист в плеере
+                title=title,
+                performer=performer,
                 caption=f"@{ (await bot_instance.get_me()).username }"
             ),
             reply_markup=None
         )
-        # Успех! Выходим. В канал ничего не попало
         return
     except Exception as e:
-        # ОШИБКА СТЕЛСА. Часто бывает, если Telegram не может скачать обложку
-        # Попробуем еще раз БЕЗ обложки, но всё еще СТЕЛС (без канала)
+        # ОШИБКА СТЕЛСА (часто из-за картинки)
+        # Пробуем без картинки
         if not file_id and thumb_obj:
             try:
                 await bot_instance.edit_message_media(
                     inline_message_id=im_id,
                     media=InputMediaAudio(
-                        media=media_obj, # Тот же URL
+                        media=media_obj, 
                         title=title,
                         performer=performer,
                         caption=f"@{ (await bot_instance.get_me()).username }"
-                        # Без thumbnail
                     ),
                     reply_markup=None
                 )
-                return # Успех без обложки
+                return 
             except: pass
 
     # 3. ПОПЫТКА 2: ЗАГРУЗКА В КАНАЛ (PLAN B)
-    # Сюда попадаем только если:
-    # а) В чате запрещена музыка (TelegramBadRequest)
-    # б) Прямая ссылка протухла или недоступна для серверов Telegram
-    
     if not file_id and track:
         try:
-            # Грузим в канал. Тут метаданные применятся 100%
             dump_msg = await bot_instance.send_audio(
                 chat_id=DUMP_CHANNEL_ID,
                 audio=track['url'],
@@ -147,19 +138,16 @@ async def fast_swap(im_id, source, item_id):
             file_id = dump_msg.audio.file_id
             msg_id = dump_msg.message_id
             
-            # Сохраняем в кэш, раз уж скачали
+            # Сохраняем в кэш
             asyncio.create_task(save_cached_info(source, item_id, file_id, msg_id))
         except Exception: 
-            # Если даже в канал не грузит - всё, финиш
             try: await bot_instance.edit_message_text(inline_message_id=im_id, text="❌ Err")
             except: pass
             return 
 
-    # 4. ФИНАЛЬНАЯ ПОДМЕНА (Используя ID из канала)
-    # Если мы здесь, значит файл теперь есть в канале
+    # 4. ФИНАЛЬНАЯ ПОДМЕНА (Через ID из канала)
     if file_id:
         try:
-            # Пробуем подменить еще раз, теперь с file_id
             await bot_instance.edit_message_media(
                 inline_message_id=im_id,
                 media=InputMediaAudio(
@@ -172,8 +160,7 @@ async def fast_swap(im_id, source, item_id):
                 reply_markup=None
             )
         except TelegramBadRequest:
-            # 5. ОБХОД БЛОКИРОВКИ
-            # Если даже edit_message_media с file_id не сработал -> Чат запрещает музыку
+            # 5. ОБХОД БЛОКИРОВКИ (ЧАТ ЗАПРЕТИЛ МУЗЫКУ)
             if msg_id:
                 link = f"https://t.me/{DUMP_CHANNEL_USERNAME}/{msg_id}" if DUMP_CHANNEL_USERNAME \
                        else f"https://t.me/c/{str(DUMP_CHANNEL_ID).replace('-100', '')}/{msg_id}"
