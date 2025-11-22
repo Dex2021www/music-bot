@@ -47,6 +47,7 @@ class SoundCloudEngine:
 
     async def search_raw(self, query: str):
         client_id = self.key_manager.get_id()
+        # Лимит SC снижаем до минимума в запросе
         params = {"q": query, "client_id": client_id, "limit": SEARCH_CANDIDATES_SC, "app_version": "1700000000"}
         
         async with self.sem:
@@ -65,7 +66,7 @@ class SoundCloudEngine:
                     for item in collection:
                         if not item.get('streamable'): continue
                         
-                        # Оптимизация обложки (берем t500x500 для качества)
+                        # Легкая обработка обложки
                         artwork = item.get('artwork_url') or item.get('user', {}).get('avatar_url')
                         if artwork: artwork = artwork.replace('large', 't500x500')
 
@@ -118,70 +119,38 @@ class SoundCloudEngine:
                 if resp.status == 200: return (await resp.json(loads=ujson.loads)).get('url')
         except: return None
 
-# (импорты те же, добавь FIRST_COMPLETED)
-from asyncio import FIRST_COMPLETED
-
 class YouTubeEngine:
     __slots__ = ('session', 'sem')
     def __init__(self, session):
         self.session = session
-        self.sem = asyncio.Semaphore(5) # Чуть подняли лимит
+        self.sem = asyncio.Semaphore(4)
 
-    async def _fetch(self, url, params):
-        """Одиночный запрос к зеркалу"""
-        try:
-            async with self.session.get(url, params=params, timeout=2.5) as resp:
-                if resp.status == 200:
-                    return await resp.json(loads=ujson.loads)
-        except: pass
-        return None
+    async def _request(self, endpoint, params=None):
+        # CPU SAVER: Перемешиваем зеркала и пробуем по очереди
+        # Не делаем параллельных запросов, чтобы не грузить 0.1 CPU SSL-хендшейками
+        mirrors = PIPED_MIRRORS.copy()
+        random.shuffle(mirrors)
 
-    async def _race_request(self, endpoint, params=None):
-        """ГОНКА: Запускаем 3 запроса, берем первый успешный"""
-        # Берем 3 случайных зеркала, чтобы не ддосить одно и то же
-        mirrors = random.sample(PIPED_MIRRORS, min(len(PIPED_MIRRORS), 3))
-        
-        tasks = []
-        for base in mirrors:
-            url = f"{base}{endpoint}"
-            tasks.append(asyncio.create_task(self._fetch(url, params)))
-
-        try:
-            # Ждем, пока завершится ХОТЯ БЫ ОДИН
-            done, pending = await asyncio.wait(tasks, return_when=FIRST_COMPLETED)
-            
-            # Ищем успешный результат среди завершенных
-            for task in done:
-                result = task.result()
-                if result:
-                    # Отменяем остальные, они нам не нужны
-                    for p in pending: p.cancel()
-                    return result
-            
-            # Если победителей нет, ждем остальных (редкий кейс)
-            if pending:
-                done, _ = await asyncio.wait(pending, return_when=FIRST_COMPLETED)
-                for task in done:
-                    result = task.result()
-                    if result: return result
-                    
-        except: pass
+        for base_url in mirrors:
+            try:
+                async with self.session.get(f"{base_url}{endpoint}", params=params, timeout=2.5) as resp:
+                    if resp.status == 200:
+                        return await resp.json(loads=ujson.loads)
+            except: pass 
         return None
 
     async def search_raw(self, query: str):
         async with self.sem:
-            # Используем гонку
-            data = await self._race_request("/search", {"q": query, "filter": "videos"})
-            
+            data = await self._request("/search", {"q": query, "filter": "videos"})
             if not data: return []
+            
             items = data.get('items', [])
             candidates = []
-            
-            # Лимит цикла жесткий, чтобы не тратить CPU
+            # Жесткий лимит цикла обработки
             for item in items[:SEARCH_CANDIDATES_YT]:
                 url_part = item.get('url', '')
                 if "watch?v=" not in url_part: continue
-                
+
                 candidates.append({
                     'source': 'YT',
                     'id': url_part.split("v=")[-1].split("&")[0],
@@ -194,15 +163,12 @@ class YouTubeEngine:
             return candidates
 
     async def resolve_url(self, video_id):
-        # Тоже используем гонку для получения ссылки
-        data = await self._race_request(f"/streams/{video_id}")
+        data = await self._request(f"/streams/{video_id}")
         if not data: return None
         try:
             streams = data.get('audioStreams', [])
-            # Берем первый попавшийся M4A (это быстрее сортировки)
             best = next((s for s in streams if s.get('format') == 'M4A'), None)
             if not best and streams: best = streams[0]
-            
             if not best: return None
 
             return {
@@ -226,12 +192,10 @@ class MultiEngine:
         if not tasks: return []
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Flatten list
         final = []
         for r in results:
             if isinstance(r, list): final.extend(r)
             
-        # Оптимизированная сортировка (сначала по совпадению, потом по просмотрам)
         for c in final:
             c['score'] = calculate_score(c, query)
         
