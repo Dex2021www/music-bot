@@ -26,7 +26,7 @@ def calculate_score(item, query_raw):
     import re
     item_words = set(re.findall(r'\w+', full_text))
 
-    # 1. СОВПАДЕНИЕ СЛОВ
+    # 1 СОВПАДЕНИЕ СЛОВ
     if not query_words: return 0
 
     common_words = query_words.intersection(item_words)
@@ -41,21 +41,21 @@ def calculate_score(item, query_raw):
     else:
         return -100
 
-    # 2. ТОЧНАЯ ФРАЗА
+    # 2 ТОЧНАЯ ФРАЗА
     if query_clean in full_text:
         score += 100
 
-    # 3. ПОПУЛЯРНОСТЬ
+    # 3 ПОПУЛЯРНОСТЬ
     plays = item.get('playback_count', 0) or 0
     if plays > 0:
         try:
             score += math.log10(plays) * 20
         except: pass
 
-    # 4. БОНУС SC УБРАН!
-    # Раньше здесь было +10 для SC, теперь условия равны.
+    # 4 БОНУС SC УБРАН
+    # Раньше здесь было +10 для SC, теперь условия равны
 
-    # 5. ШТРАФЫ
+    # 5 ШТРАФЫ
     dur = item.get('duration', 0) / 1000
     if dur < 40: score -= 50
     elif dur > 900: score -= 30

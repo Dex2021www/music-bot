@@ -1,1 +1,6 @@
 .env
+run_bot.py
+venv
+venv/
+__pycache__/
+start.py
