@@ -105,7 +105,7 @@ async def process_track(im_id, source, item_id):
             return
 
     # В. ОТДАЕМ ЮЗЕРУ (ПОДМЕНА)
-    # Теперь у нас есть file_id, в котором УЖЕ зашиты картинка и название.
+    # Теперь у нас есть file_id, в котором УЖЕ зашиты картинка и название
     if file_id:
         try:
             await bot_instance.edit_message_media(
