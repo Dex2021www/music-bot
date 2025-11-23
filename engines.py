@@ -4,6 +4,7 @@ import ujson
 import logging
 import gc
 import random
+import re
 from config import (
     MAX_CONCURRENT_REQ, SEARCH_CANDIDATES_SC, SEARCH_CANDIDATES_YT,
     PIPED_MIRRORS, FALLBACK_CLIENT_ID, BAD_CHARS_RE
@@ -15,18 +16,23 @@ logger = logging.getLogger(__name__)
 class KeyManager:
     def __init__(self, session):
         self.session = session
+        # Используем ID из конфига как базу
         self.client_id = FALLBACK_CLIENT_ID
 
     async def fetch_new_key(self):
         gc.collect()
         try:
+            # Старый простой метод получения ключа
             async with self.session.get("https://soundcloud.com/discover", timeout=3) as resp:
                 if resp.status != 200: return
                 text = await resp.text()
-            import re
+            
+            # Ищем скрипты
             js_urls = re.findall(r'src="(https://[^"]+/assets/[^"]+\.js)"', text)
             del text
             if not js_urls: return
+            
+            # Проверяем последние 2 скрипта
             for url in js_urls[-2:]:
                 async with self.session.get(url, timeout=3) as js_resp:
                     if js_resp.status != 200: continue
@@ -46,15 +52,15 @@ class SoundCloudEngine:
         self.key_manager = key_manager
 
     async def search_raw(self, query: str):
+        # Старые параметры запроса
         client_id = self.key_manager.get_id()
-        # Лимит SC снижаем до минимума в запросе
-        params = {"q": query, "client_id": client_id, "limit": SEARCH_CANDIDATES_SC, "app_version": "1700000000"}
+        params = {"q": query, "client_id": client_id, "limit": SEARCH_CANDIDATES_SC, "app_version": "1699953100"}
         
         async with self.sem:
             try:
-                async with self.session.get("https://api-v2.soundcloud.com/search/tracks", params=params, timeout=3) as resp:
+                async with self.session.get("https://api-v2.soundcloud.com/search/tracks", params=params, timeout=4) as resp:
                     if resp.status == 401:
-                        asyncio.create_task(self.key_manager.fetch_new_key())
+                        await self.key_manager.fetch_new_key()
                         return []
                     if resp.status != 200: return []
                     
@@ -66,7 +72,7 @@ class SoundCloudEngine:
                     for item in collection:
                         if not item.get('streamable'): continue
                         
-                        # Легкая обработка обложки
+                        # Простая обработка обложки
                         artwork = item.get('artwork_url') or item.get('user', {}).get('avatar_url')
                         if artwork: artwork = artwork.replace('large', 't500x500')
 
@@ -76,7 +82,7 @@ class SoundCloudEngine:
 
                         candidates.append({
                             'source': 'SC',
-                            'id': item['id'],
+                            'id': str(item['id']),
                             'title': item.get('title', '')[:100],
                             'artist': item.get('user', {}).get('username', 'Unknown')[:50],
                             'playback_count': item.get('playback_count', 0),
@@ -125,59 +131,67 @@ class YouTubeEngine:
         self.session = session
         self.sem = asyncio.Semaphore(4)
 
-    async def _request(self, endpoint, params=None):
-        # CPU SAVER: Перемешиваем зеркала и пробуем по очереди
-        # Не делаем параллельных запросов, чтобы не грузить 0.1 CPU SSL-хендшейками
+    async def search_raw(self, query: str):
+        # Простой перебор зеркал для поиска
+        mirrors = PIPED_MIRRORS.copy()
+        random.shuffle(mirrors)
+        
+        async with self.sem:
+            for base in mirrors:
+                try:
+                    async with self.session.get(f"{base}/search", params={"q": query, "filter": "videos"}, timeout=3) as resp:
+                        if resp.status == 200:
+                            data = await resp.json(loads=ujson.loads)
+                            items = data.get('items', [])
+                            candidates = []
+                            for item in items[:SEARCH_CANDIDATES_YT]:
+                                url_part = item.get('url', '')
+                                if "watch?v=" not in url_part: continue
+                                candidates.append({
+                                    'source': 'YT',
+                                    'id': url_part.split("v=")[-1].split("&")[0],
+                                    'title': item.get('title', '')[:100],
+                                    'artist': item.get('uploaderName', 'YouTube')[:50],
+                                    'playback_count': item.get('views', 0),
+                                    'duration': item.get('duration', 0) * 1000,
+                                    'artwork_url': item.get('thumbnail')
+                                })
+                            return candidates
+                except: continue
+            return []
+
+    async def resolve_url(self, video_id):
+        # АГРЕССИВНЫЙ РЕЗОЛВЕР (НОВЫЙ, РАБОЧИЙ)
+        # Проверяем зеркала на наличие аудиопотоков
         mirrors = PIPED_MIRRORS.copy()
         random.shuffle(mirrors)
 
-        for base_url in mirrors:
+        for base in mirrors:
             try:
-                async with self.session.get(f"{base_url}{endpoint}", params=params, timeout=2.5) as resp:
-                    if resp.status == 200:
-                        return await resp.json(loads=ujson.loads)
-            except: pass 
+                async with self.session.get(f"{base}/streams/{video_id}", timeout=3) as resp:
+                    if resp.status != 200: continue
+                    
+                    data = await resp.json(loads=ujson.loads)
+                    
+                    # Если зеркало вернуло пустые потоки - оно забанено, идем дальше
+                    if not data or 'audioStreams' not in data or not data['audioStreams']:
+                        continue 
+
+                    streams = data['audioStreams']
+                    best = next((s for s in streams if s.get('format') == 'M4A'), None)
+                    if not best and streams: best = streams[0]
+                    
+                    if not best: continue
+
+                    return {
+                        'url': best['url'],
+                        'title': data.get('title', 'Track'),
+                        'artist': data.get('uploader', 'YouTube'),
+                        'thumbnail': data.get('thumbnailUrl')
+                    }
+            except: 
+                continue
         return None
-
-    async def search_raw(self, query: str):
-        async with self.sem:
-            data = await self._request("/search", {"q": query, "filter": "videos"})
-            if not data: return []
-            
-            items = data.get('items', [])
-            candidates = []
-            # Жесткий лимит цикла обработки
-            for item in items[:SEARCH_CANDIDATES_YT]:
-                url_part = item.get('url', '')
-                if "watch?v=" not in url_part: continue
-
-                candidates.append({
-                    'source': 'YT',
-                    'id': url_part.split("v=")[-1].split("&")[0],
-                    'title': item.get('title', '')[:100],
-                    'artist': item.get('uploaderName', 'YouTube')[:50],
-                    'playback_count': item.get('views', 0),
-                    'duration': item.get('duration', 0) * 1000,
-                    'artwork_url': item.get('thumbnail')
-                })
-            return candidates
-
-    async def resolve_url(self, video_id):
-        data = await self._request(f"/streams/{video_id}")
-        if not data: return None
-        try:
-            streams = data.get('audioStreams', [])
-            best = next((s for s in streams if s.get('format') == 'M4A'), None)
-            if not best and streams: best = streams[0]
-            if not best: return None
-
-            return {
-                'url': best['url'],
-                'title': data.get('title', 'Track'),
-                'artist': data.get('uploader', 'YouTube'),
-                'thumbnail': data.get('thumbnailUrl')
-            }
-        except: return None
 
 class MultiEngine:
     def __init__(self, session, sc_key_manager):
