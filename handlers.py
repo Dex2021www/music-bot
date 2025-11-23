@@ -1,5 +1,6 @@
 import asyncio
 import re
+import logging # <--- ЛОГИ
 from aiogram import Router, types
 from aiogram.types import (
     InlineQuery, InlineQueryResultArticle, InputTextMessageContent,
@@ -15,6 +16,9 @@ router = Router()
 engine = None
 bot_instance = None 
 
+# Настраиваем логгер
+logger = logging.getLogger("HANDLERS")
+
 def setup_handlers(main_engine, main_bot):
     global engine, bot_instance
     engine = main_engine
@@ -29,6 +33,8 @@ def clean_filename(text):
 async def inline_handler(query: InlineQuery):
     text = query.query.strip()
     if len(text) < 2: return
+    # Лог только при старте поиска, чтобы не спамить
+    # logger.info(f"IQ: {text}") 
 
     results = await engine.search(text, 'all')
     if not results: return
@@ -59,21 +65,26 @@ async def inline_handler(query: InlineQuery):
     await query.answer(iq_results, cache_time=300, is_personal=True)
 
 
-# --- 2. ГЛАВНАЯ ЛОГИКА (СКЛАД + ВИТРИНА) ---
+# --- 2. ГЛАВНАЯ ЛОГИКА ---
 async def process_track(im_id, source, item_id):
+    logger.info(f"👉 CLICK: {source} {item_id}")
+    
     # А. ПРОВЕРКА КЭША
     cached = await get_cached_info(source, item_id)
     file_id = cached.get('file_id') if cached else None
     cache_msg_id = cached.get('message_id') if cached else None
 
-    # Б. ЕСЛИ НЕТ В БАЗЕ - ГРУЗИМ В СКЛАД (CACHE)
-    if not file_id:
+    if file_id:
+        logger.info(f"💾 CACHE HIT: {file_id[:10]}...")
+    else:
+        logger.info("🌍 DOWNLOADING (No cache)...")
         try:
             track = None
             if source == 'SC': track = await engine.sc.resolve_url_by_id(item_id)
             else: track = await engine.yt.resolve_url(item_id)
             
             if not track or not track.get('url'):
+                logger.error("❌ FAILED to resolve URL")
                 try: await bot_instance.edit_message_text(inline_message_id=im_id, text="❌")
                 except: pass
                 return
@@ -83,7 +94,8 @@ async def process_track(im_id, source, item_id):
             thumb_url = track.get('thumbnail')
             safe_name = clean_filename(f"{performer} - {title}")
 
-            # Грузим в ПРИВАТНЫЙ канал (Склад)
+            logger.info(f"📤 UPLOADING to CACHE CHANNEL ({CACHE_CHANNEL_ID})")
+            
             dump_msg = await bot_instance.send_audio(
                 chat_id=CACHE_CHANNEL_ID,
                 audio=URLInputFile(track['url'], filename=safe_name),
@@ -97,14 +109,15 @@ async def process_track(im_id, source, item_id):
             cache_msg_id = dump_msg.message_id
             
             asyncio.create_task(save_cached_info(source, item_id, file_id, cache_msg_id))
+            logger.info("✅ UPLOAD SUCCESS")
 
         except Exception as e:
-            print(f"DL Error: {e}")
+            logger.error(f"❌ UPLOAD ERROR: {e}")
             try: await bot_instance.edit_message_text(inline_message_id=im_id, text="❌ Err")
             except: pass
             return
 
-    # В. ПОПЫТКА ПОКАЗАТЬ В ЧАТЕ (STEALTH)
+    # В. ПОКАЗ ЮЗЕРУ
     if file_id:
         try:
             await bot_instance.edit_message_media(
@@ -115,31 +128,36 @@ async def process_track(im_id, source, item_id):
                 ),
                 reply_markup=None
             )
-        except TelegramBadRequest:
-            # Г. ЕСЛИ ЗАПРЕТ - КОПИРУЕМ В ПУБЛИЧНЫЙ (BYPASS)
-            bypass_link = None
-            if cache_msg_id:
-                try:
-                    copy = await bot_instance.copy_message(
-                        chat_id=BYPASS_CHANNEL_ID,
-                        from_chat_id=CACHE_CHANNEL_ID,
-                        message_id=cache_msg_id
-                    )
-                    bypass_link = f"https://t.me/{BYPASS_CHANNEL_USERNAME}/{copy.message_id}"
-                except Exception: pass
+        except TelegramBadRequest as e:
+            if "forbidden" in str(e).lower() or "rights" in str(e).lower():
+                logger.warning(f"🚫 RESTRICTED CHAT: Copying to Bypass...")
+                bypass_link = None
+                if cache_msg_id:
+                    try:
+                        copy = await bot_instance.copy_message(
+                            chat_id=BYPASS_CHANNEL_ID,
+                            from_chat_id=CACHE_CHANNEL_ID,
+                            message_id=cache_msg_id
+                        )
+                        bypass_link = f"https://t.me/{BYPASS_CHANNEL_USERNAME}/{copy.message_id}"
+                    except Exception as err:
+                        logger.error(f"COPY ERROR: {err}")
 
-            if bypass_link:
-                try:
-                    await bot_instance.edit_message_text(
-                        inline_message_id=im_id,
-                        text=f"<a href='{bypass_link}'>&#8203;</a>🚫 <b>Музыка запрещена</b>", 
-                        parse_mode="HTML",
-                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                            InlineKeyboardButton(text="▶ Слушать (Обход)", url=bypass_link)
-                        ]])
-                    )
-                except: pass
-        except Exception: pass
+                if bypass_link:
+                    try:
+                        await bot_instance.edit_message_text(
+                            inline_message_id=im_id,
+                            text=f"<a href='{bypass_link}'>&#8203;</a>🚫 <b>Музыка запрещена</b>", 
+                            parse_mode="HTML",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                                InlineKeyboardButton(text="▶ Слушать", url=bypass_link)
+                            ]])
+                        )
+                    except: pass
+            else:
+                logger.error(f"⚠️ EDIT MEDIA ERROR: {e}")
+        except Exception as e:
+             logger.error(f"⚠️ UNKNOWN EDIT ERROR: {e}")
 
 # --- ТРИГГЕРЫ ---
 @router.chosen_inline_result()
@@ -150,13 +168,9 @@ async def chosen_handler(chosen: ChosenInlineResult):
 
 @router.callback_query(lambda c: c.data.startswith("f:"))
 async def force_dl(call: types.CallbackQuery):
-    # 1. СРАЗУ отвечаем Телеграму, чтобы не было тайм-аутов
-    try:
-        await call.answer()
-    except:
-        pass # Игнорируем, если нажатие устарело
-
-    # 2. Потом делаем дела
+    try: await call.answer()
+    except: pass
+    
     _, src, iid = call.data.split(":")
     if call.inline_message_id:
         await process_track(call.inline_message_id, src, iid)
